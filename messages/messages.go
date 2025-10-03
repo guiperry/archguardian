@@ -1,7 +1,7 @@
 package messages
 
 import (
-	"archgardian/types"
+	"archguardian/types"
 	"time"
 )
 

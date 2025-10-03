@@ -28,13 +28,16 @@ type Node struct {
 type NodeType string
 
 const (
-	NodeTypeCode     NodeType = "code"
-	NodeTypeAPI      NodeType = "api"
-	NodeTypeDatabase NodeType = "database"
-	NodeTypeService  NodeType = "service"
-	NodeTypeLibrary  NodeType = "library"
-	NodeTypeDataFlow NodeType = "dataflow"
-	NodeTypeConfig   NodeType = "config"
+	NodeTypeCode       NodeType = "code"
+	NodeTypeAPI        NodeType = "api"
+	NodeTypeDatabase   NodeType = "database"
+	NodeTypeService    NodeType = "service"
+	NodeTypeLibrary    NodeType = "library"
+	NodeTypeDataFlow   NodeType = "dataflow"
+	NodeTypeConfig     NodeType = "config"
+	NodeTypeProcess    NodeType = "process"
+	NodeTypeConnection NodeType = "connection"
+	NodeTypeNetwork    NodeType = "network"
 )
 
 type Edge struct {
@@ -94,4 +97,3 @@ type DependencyRisk struct {
 	Maintenance    string // "active", "deprecated", "abandoned"
 	Recommendation string
 }
-

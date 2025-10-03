@@ -38,8 +38,9 @@ type InferenceService struct {
 	primaryAttempts  []LLMAttempt
 	fallbackAttempts []LLMAttempt
 	delegator        *DelegatorService
-	db               DatabaseAccessor // ADDED: Use the DatabaseAccessor interface
-	contextManager   *ContextManager  // ADDED: Context Manager instance
+	orchestrator     *TaskOrchestrator // ADDED: Orchestrator for complex, multi-step tasks
+	db               DatabaseAccessor  // ADDED: Use the DatabaseAccessor interface
+	contextManager   *ContextManager   // ADDED: Context Manager instance
 	isRunning        bool
 	mutex            sync.Mutex
 	moa              *gollm.MOA
@@ -66,7 +67,7 @@ func NewInferenceService(db DatabaseAccessor) (*InferenceService, error) {
 }
 
 // StartWithConfig configures the service with dynamic LLM configurations and starts it.
-func (s *InferenceService) StartWithConfig(attemptConfigs []LLMAttemptConfig) error {
+func (s *InferenceService) StartWithConfig(attemptConfigs []LLMAttemptConfig, plannerModel string, executorModels []string, finalizerModel string, verifierModel string) error {
 	log.Println("InferenceService: Starting with dynamic configuration...")
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -147,6 +148,13 @@ func (s *InferenceService) StartWithConfig(attemptConfigs []LLMAttemptConfig) er
 		return fmt.Errorf("failed to create delegator service")
 	}
 	log.Println("InferenceService: DelegatorService created.")
+
+	// --- Create the Task Orchestrator ---
+	s.orchestrator = NewTaskOrchestrator(s.delegator, plannerModel, executorModels, finalizerModel, verifierModel)
+	if s.orchestrator == nil {
+		return fmt.Errorf("failed to create task orchestrator")
+	}
+	log.Println("InferenceService: TaskOrchestrator created.")
 
 	s.isRunning = true
 	log.Println("InferenceService: Started successfully with dynamic configuration.")
@@ -272,7 +280,8 @@ func (s *InferenceService) Stop() error {
 	s.moa = nil // Clear MOA instance
 	s.moaPrimaryOpts = nil
 	s.moaFallbackOpts = nil
-	s.delegator = nil // Clear delegator
+	s.delegator = nil    // Clear delegator
+	s.orchestrator = nil // Clear orchestrator
 	// s.contextManager = nil // Keep context manager? Or re-init on Start? Let's keep it.
 	log.Println("InferenceService stopped.")
 	return nil
@@ -382,6 +391,22 @@ func (s *InferenceService) GenerateTextWithContextManager(promptText, instructio
 	// Wrap the LLM in our adapter to implement TextGenerator
 	wrappedLLM := &LLMAdapter{LLM: llmInstance, ProviderName: llmProviderName} // Pass ProviderName
 	return ctxMgr.ProcessLargePrompt(ctx, wrappedLLM, promptText, instruction)
+}
+
+// ExecuteComplexTask delegates a complex task to the orchestrator.
+func (s *InferenceService) ExecuteComplexTask(ctx context.Context, complexPrompt string) (string, error) {
+	s.mutex.Lock()
+	if !s.isRunning || s.orchestrator == nil {
+		s.mutex.Unlock()
+		return "", errors.New("inference service is not running or orchestrator not configured")
+	}
+	orchestratorInstance := s.orchestrator
+	s.mutex.Unlock()
+
+	log.Println("InferenceService: Delegating complex task to TaskOrchestrator...")
+	response, err := orchestratorInstance.ExecuteComplexTask(ctx, complexPrompt)
+
+	return response, err
 }
 
 // --- Update other generation methods to use DelegatorService ---

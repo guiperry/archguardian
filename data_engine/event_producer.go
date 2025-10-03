@@ -8,7 +8,7 @@ import (
 
 	"github.com/segmentio/kafka-go"
 
-	"archgardian/messages"
+	"archguardian/messages"
 )
 
 // EventType represents different types of events that can be produced

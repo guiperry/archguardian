@@ -1,0 +1,248 @@
+name: ArchGuardian CI/CD
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        go-version: [1.21.x, 1.22.x]
+
+    services:
+      # Add services if needed (e.g., PostgreSQL, Redis)
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Full history for coverage analysis
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ matrix.go-version }}
+        cache: true
+
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+        key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-${{ matrix.go-version }}-
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential git
+
+    - name: Download Go dependencies
+      run: go mod download
+
+    - name: Verify dependencies
+      run: go mod verify
+
+    - name: Run Go vet
+      run: go vet ./...
+
+    - name: Run go fmt check
+      run: |
+        if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
+          echo "The following files need to be formatted:"
+          gofmt -s -l .
+          exit 1
+        fi
+
+    - name: Run tests with coverage
+      run: |
+        go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.out
+        flags: unittests
+        name: codecov-umbrella
+        fail_ci_if_error: false
+
+    - name: Generate coverage report
+      run: |
+        go tool cover -html=coverage.out -o coverage.html
+
+    - name: Upload coverage report
+      uses: actions/upload-artifact@v3
+      with:
+        name: coverage-report-${{ matrix.go-version }}
+        path: coverage.html
+
+    - name: Run benchmark tests
+      run: |
+        go test -bench=. -benchmem ./...
+
+    - name: Build application
+      run: |
+        go build -v -o archguardian .
+
+    - name: Test binary
+      run: |
+        chmod +x archguardian
+        # Basic smoke test
+        timeout 10s ./archguardian --help || echo "Binary test completed"
+
+    - name: Archive test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-results-${{ matrix.go-version }}
+        path: |
+          *.out
+          *.log
+
+  security:
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: 1.22.x
+        cache: true
+
+    - name: Run Gosec Security Scanner
+      uses: securecodewarrior/github-action-gosec@master
+      with:
+        args: './...'
+
+    - name: Run govulncheck
+      run: |
+        go install golang.org/x/vuln/cmd/govulncheck@latest
+        govulncheck ./...
+
+  integration:
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: 1.22.x
+        cache: true
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build Docker image
+      run: |
+        docker build -t archguardian:latest .
+
+    - name: Test Docker image
+      run: |
+        # Start the container in background
+        docker run -d --name archguardian-test \
+          -e PROJECT_PATH=/app \
+          -e SCAN_INTERVAL_HOURS=1 \
+          -p 3000:3000 \
+          archguardian:latest
+
+        # Wait for application to start
+        sleep 30
+
+        # Test health endpoint
+        curl -f http://localhost:3000/health || exit 1
+
+        # Test API endpoints
+        curl -f http://localhost:3000/api/v1/knowledge-graph || exit 1
+
+        # Clean up
+        docker stop archguardian-test
+        docker rm archguardian-test
+
+  deploy-docs:
+    runs-on: ubuntu-latest
+    needs: [test, security]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Generate documentation
+      run: |
+        # Generate Go documentation
+        go install golang.org/x/tools/cmd/godoc@latest
+        mkdir -p docs
+
+        # Generate API documentation
+        echo "# ArchGuardian API Documentation" > docs/api.md
+        echo "## Endpoints" >> docs/api.md
+        echo "- GET /health - Health check" >> docs/api.md
+        echo "- GET /api/v1/knowledge-graph - Knowledge graph data" >> docs/api.md
+        echo "- GET /api/v1/risk-assessment - Risk assessment data" >> docs/api.md
+        echo "- GET /api/v1/issues - Issues data" >> docs/api.md
+        echo "- GET /api/v1/coverage - Coverage data" >> docs/api.md
+
+    - name: Deploy to GitHub Pages
+      uses: peaceiris/actions-gh-pages@v3
+      if: github.ref == 'refs/heads/main'
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: ./docs
+
+  notify:
+    runs-on: ubuntu-latest
+    needs: [test, security, integration]
+    if: always() && (needs.test.result == 'failure' || needs.security.result == 'failure' || needs.integration.result == 'failure')
+
+    steps:
+    - name: Notify on failure
+      run: |
+        echo "❌ CI/CD pipeline failed!"
+        echo "Test result: ${{ needs.test.result }}"
+        echo "Security result: ${{ needs.security.result }}"
+        echo "Integration result: ${{ needs.integration.result }}"
+
+        # Here you could add Slack/Discord/Teams notifications
+        # curl -X POST -H 'Content-type: application/json' \
+        #   --data '{"text":"ArchGuardian CI/CD failed!"}' \
+        #   ${{ secrets.SLACK_WEBHOOK }}
+
+  cleanup:
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+    - name: Cleanup artifacts
+      run: |
+        echo "🧹 Cleaning up old artifacts..."
+        # GitHub Actions automatically cleans up old artifacts
+        # but we can add custom cleanup logic here if needed

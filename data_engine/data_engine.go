@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"archgardian/messages"
+	"archguardian/messages"
 )
 
 // DataEngine is the main manager for all data engineering components

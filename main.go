@@ -1,20 +1,42 @@
 package main
 
 import (
-	"archgardian/data_engine"
-	"archgardian/inference_engine"
-	"archgardian/types"
+	"archguardian/data_engine"
+	"archguardian/inference_engine"
+	"archguardian/types"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
+	"go/parser"
+	"go/token"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gorilla/mux"
+	"github.com/joho/godotenv"
+	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/disk"
+	"github.com/shirou/gopsutil/v4/mem"
+	"github.com/shirou/gopsutil/v4/net"
+	"github.com/shirou/gopsutil/v4/process"
 )
+
+//go:embed dashboard/index.html
+var dashboardHTML string
+
+//go:embed dashboard/style.css
+var dashboardCSS string
+
+//go:embed dashboard/app.js
+var dashboardJS string
 
 // ============================================================================
 // CONFIGURATION
@@ -25,6 +47,7 @@ type Config struct {
 	GitHubToken       string
 	GitHubRepo        string
 	AIProviders       AIProviderConfig
+	Orchestrator      OrchestratorConfig
 	DataEngine        DataEngineConfig
 	ScanInterval      time.Duration
 	RemediationBranch string
@@ -38,6 +61,14 @@ type AIProviderConfig struct {
 	DeepSeek  ProviderCredentials // Code remediation (fallback)
 
 	CodeRemediationProvider string // "anthropic", "openai", or "deepseek"
+}
+
+// OrchestratorConfig defines the models used for each role in the task orchestrator.
+type OrchestratorConfig struct {
+	PlannerModel   string
+	ExecutorModels []string
+	FinalizerModel string
+	VerifierModel  string
 }
 
 type ProviderCredentials struct {
@@ -65,15 +96,15 @@ type DataEngineConfig struct {
 
 type Scanner struct {
 	config *Config
-	graph  *types.KnowledgeGraph
-	ai     *AIInferenceEngine
+	graph  *types.KnowledgeGraph // This should be *types.KnowledgeGraph
+	ai     *AIInferenceEngine    // This should be *AIInferenceEngine
 }
 
-func NewScanner(cfg *Config) *Scanner {
+func NewScanner(cfg *Config, ai *AIInferenceEngine) *Scanner {
 	return &Scanner{
 		config: cfg,
 		graph:  NewKnowledgeGraph(),
-		ai:     NewAIInferenceEngine(&cfg.AIProviders),
+		ai:     NewAIInferenceEngine(cfg),
 	}
 }
 
@@ -97,17 +128,27 @@ func (s *Scanner) ScanProject(ctx context.Context) error {
 		return fmt.Errorf("dependency scan failed: %w", err)
 	}
 
-	// Phase 3: Database Schema Analysis
+	// Phase 3: Runtime Inspection
+	if err := s.scanRuntime(ctx); err != nil {
+		return fmt.Errorf("runtime scan failed: %w", err)
+	}
+
+	// Phase 4: Database Schema Analysis
 	if err := s.scanDatabaseModels(ctx); err != nil {
 		return fmt.Errorf("database scan failed: %w", err)
 	}
 
-	// Phase 4: API Discovery
+	// Phase 5: API Discovery
 	if err := s.scanAPIs(ctx); err != nil {
 		return fmt.Errorf("API scan failed: %w", err)
 	}
 
-	// Phase 5: Build Knowledge Graph
+	// Phase 6: Test Coverage Analysis
+	if err := s.scanTestCoverage(ctx); err != nil {
+		return fmt.Errorf("test coverage scan failed: %w", err)
+	}
+
+	// Phase 7: Build Knowledge Graph
 	if err := s.buildKnowledgeGraph(ctx); err != nil {
 		return fmt.Errorf("knowledge graph build failed: %w", err)
 	}
@@ -143,11 +184,15 @@ func (s *Scanner) scanStaticCode(ctx context.Context) error {
 				Dependents:   make([]string, 0),
 			}
 
-			// Parse file for imports/dependencies
+			// Parse file for imports/dependencies using AST parsing
 			content, err := os.ReadFile(path)
 			if err == nil {
 				node.Metadata["lines"] = strings.Count(string(content), "\n")
 				node.Metadata["size"] = info.Size()
+
+				// Use AST parsing for accurate dependency extraction
+				dependencies := s.parseFileDependencies(path, content)
+				node.Dependencies = dependencies
 
 				// Use Cerebras for quick analysis
 				analysis, _ := s.ai.AnalyzeCodeFile(ctx, string(content), AIProviderCerebras)
@@ -171,7 +216,7 @@ func (s *Scanner) scanDependencies(ctx context.Context) error {
 
 	// Scan go.mod
 	if _, err := os.Stat(filepath.Join(s.config.ProjectPath, "go.mod")); err == nil {
-		return s.scanGoMod(ctx)
+		return s.scanGoMod()
 	}
 
 	// Scan package.json
@@ -187,8 +232,8 @@ func (s *Scanner) scanDependencies(ctx context.Context) error {
 	return nil
 }
 
-func (s *Scanner) scanGoMod(ctx context.Context) error {
-	_ = ctx // Acknowledge context for future use
+// scanGoMod scans go.mod file for dependencies
+func (s *Scanner) scanGoMod() error {
 	content, err := os.ReadFile(filepath.Join(s.config.ProjectPath, "go.mod"))
 	if err != nil {
 		return err
@@ -224,8 +269,7 @@ func (s *Scanner) scanGoMod(ctx context.Context) error {
 	return nil
 }
 
-func (s *Scanner) scanPackageJSON(ctx context.Context) error {
-	_ = ctx // Acknowledge context for future use
+func (s *Scanner) scanPackageJSON(_ context.Context) error {
 	content, err := os.ReadFile(filepath.Join(s.config.ProjectPath, "package.json"))
 	if err != nil {
 		return err
@@ -256,8 +300,7 @@ func (s *Scanner) scanPackageJSON(ctx context.Context) error {
 	return nil
 }
 
-func (s *Scanner) scanRequirementsTxt(ctx context.Context) error {
-	_ = ctx // Acknowledge context for future use
+func (s *Scanner) scanRequirementsTxt(_ context.Context) error {
 	content, err := os.ReadFile(filepath.Join(s.config.ProjectPath, "requirements.txt"))
 	if err != nil {
 		return err
@@ -293,7 +336,7 @@ func (s *Scanner) scanRequirementsTxt(ctx context.Context) error {
 	return nil
 }
 
-func (s *Scanner) scanDatabaseModels(ctx context.Context) error {
+func (s *Scanner) scanDatabaseModels(_ context.Context) error {
 	log.Println("  🗄️  Scanning database models...")
 
 	// Look for common ORM patterns
@@ -313,7 +356,7 @@ func (s *Scanner) scanDatabaseModels(ctx context.Context) error {
 			}
 
 			// Use Gemini for deep analysis of database models
-			analysis, _ := s.ai.AnalyzeDatabaseModel(ctx, string(content), AIProviderGemini)
+			analysis, _ := s.ai.AnalyzeDatabaseModel(context.Background(), string(content), AIProviderGemini)
 
 			node := &types.Node{
 				ID:   generateNodeID(path),
@@ -328,6 +371,30 @@ func (s *Scanner) scanDatabaseModels(ctx context.Context) error {
 		}
 	}
 
+	return nil
+}
+
+func (s *Scanner) scanRuntime(ctx context.Context) error {
+	log.Println("  🔄 Scanning runtime environment...")
+
+	runtimeScanner := NewRuntimeScanner()
+	processNodes, connectionNodes, err := runtimeScanner.ScanSystem()
+	if err != nil {
+		log.Printf("  ⚠️  Runtime scan failed: %v", err)
+		return nil // Don't fail the entire scan for runtime issues
+	}
+
+	// Add runtime nodes to knowledge graph
+	for _, node := range processNodes {
+		s.graph.Nodes[node.ID] = node
+	}
+
+	for _, node := range connectionNodes {
+		s.graph.Nodes[node.ID] = node
+	}
+
+	log.Printf("  📊 Runtime scan complete: %d processes, %d connections",
+		len(processNodes), len(connectionNodes))
 	return nil
 }
 
@@ -404,19 +471,918 @@ func (s *Scanner) prepareGraphData() map[string]interface{} {
 	}
 }
 
+// parseFileDependencies uses AST parsing to extract accurate dependencies from source files
+func (s *Scanner) parseFileDependencies(filePath string, content []byte) []string {
+	var dependencies []string
+
+	ext := strings.ToLower(filepath.Ext(filePath))
+
+	switch ext {
+	case ".go":
+		dependencies = s.parseGoDependencies(filePath, content)
+	case ".js", ".ts", ".jsx", ".tsx":
+		dependencies = s.parseJavaScriptDependencies(filePath, content)
+	case ".py":
+		dependencies = s.parsePythonDependencies(filePath, content)
+	case ".java":
+		dependencies = s.parseJavaDependencies(filePath, content)
+	default:
+		// Fallback to simple regex parsing for unknown file types
+		dependencies = s.parseDependenciesWithRegex(filePath, content)
+	}
+
+	return dependencies
+}
+
+// parseGoDependencies uses go/parser to extract import declarations from Go files
+func (s *Scanner) parseGoDependencies(filePath string, content []byte) []string {
+	var dependencies []string
+
+	fset := token.NewFileSet()
+	node, err := parser.ParseFile(fset, filePath, content, parser.ImportsOnly)
+	if err != nil {
+		log.Printf("  ⚠️  Failed to parse Go file %s: %v", filePath, err)
+		return s.parseDependenciesWithRegex(filePath, content)
+	}
+
+	for _, imp := range node.Imports {
+		// imp.Path.Value is the import path (e.g., "\"fmt\"")
+		depPath := strings.Trim(imp.Path.Value, "\"")
+		if depPath != "" {
+			dependencies = append(dependencies, depPath)
+		}
+	}
+
+	return dependencies
+}
+
+// parseJavaScriptDependencies uses regex to extract import/require statements from JS/TS files
+func (s *Scanner) parseJavaScriptDependencies(_ string, content []byte) []string {
+	var dependencies []string
+	text := string(content)
+
+	// Match ES6 imports: import ... from 'module'
+	importRegex := regexp.MustCompile(`import\s+.*?\s+from\s+['"]([^'"]+)['"]`)
+	matches := importRegex.FindAllStringSubmatch(text, -1)
+	for _, match := range matches {
+		if len(match) > 1 && match[1] != "" {
+			dependencies = append(dependencies, match[1])
+		}
+	}
+
+	// Match CommonJS requires: require('module')
+	requireRegex := regexp.MustCompile(`require\s*\(\s*['"]([^'"]+)['"]\s*\)`)
+	requireMatches := requireRegex.FindAllStringSubmatch(text, -1)
+	for _, match := range requireMatches {
+		if len(match) > 1 && match[1] != "" {
+			dependencies = append(dependencies, match[1])
+		}
+	}
+
+	// Remove duplicates
+	seen := make(map[string]bool)
+	var uniqueDeps []string
+	for _, dep := range dependencies {
+		if !seen[dep] {
+			seen[dep] = true
+			uniqueDeps = append(uniqueDeps, dep)
+		}
+	}
+
+	return uniqueDeps
+}
+
+// parsePythonDependencies uses regex to extract import statements from Python files
+func (s *Scanner) parsePythonDependencies(_ string, content []byte) []string {
+	var dependencies []string
+	text := string(content)
+
+	// Match import statements: import module or from module import ...
+	importRegex := regexp.MustCompile(`(?m)^(?:import\s+(\S+)|from\s+(\S+)\s+import)`)
+	matches := importRegex.FindAllStringSubmatch(text, -1)
+
+	for _, match := range matches {
+		for i := 1; i < len(match); i++ {
+			if match[i] != "" {
+				// Extract the module name (first part before dots)
+				moduleName := strings.Split(match[i], ".")[0]
+				if moduleName != "" {
+					dependencies = append(dependencies, moduleName)
+				}
+				break
+			}
+		}
+	}
+
+	// Remove duplicates
+	seen := make(map[string]bool)
+	var uniqueDeps []string
+	for _, dep := range dependencies {
+		if !seen[dep] {
+			seen[dep] = true
+			uniqueDeps = append(uniqueDeps, dep)
+		}
+	}
+
+	return uniqueDeps
+}
+
+// parseJavaDependencies uses regex to extract import statements from Java files
+func (s *Scanner) parseJavaDependencies(_ string, content []byte) []string {
+	var dependencies []string
+	text := string(content)
+
+	// Match Java import statements: import package.Class;
+	importRegex := regexp.MustCompile(`import\s+([a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z][a-zA-Z0-9_]*)*)\s*;`)
+	matches := importRegex.FindAllStringSubmatch(text, -1)
+
+	for _, match := range matches {
+		if len(match) > 1 && match[1] != "" {
+			dependencies = append(dependencies, match[1])
+		}
+	}
+
+	// Remove duplicates
+	seen := make(map[string]bool)
+	var uniqueDeps []string
+	for _, dep := range dependencies {
+		if !seen[dep] {
+			seen[dep] = true
+			uniqueDeps = append(uniqueDeps, dep)
+		}
+	}
+
+	return uniqueDeps
+}
+
+// parseDependenciesWithRegex is a fallback method using regex for unknown file types
+func (s *Scanner) parseDependenciesWithRegex(_ string, content []byte) []string {
+	var dependencies []string
+	text := string(content)
+
+	// Generic patterns for various languages
+	patterns := []string{
+		`import\s+['"]([^'"]+)['"]`,            // import 'module'
+		`from\s+['"]([^'"]+)['"]`,              // from 'module'
+		`require\s*\(\s*['"]([^'"]+)['"]\s*\)`, // require('module')
+		`#include\s+[<"]([^>"]+)[>"]`,          // #include <header>
+		`use\s+(\S+)`,                          // use module (Perl)
+	}
+
+	for _, pattern := range patterns {
+		regex := regexp.MustCompile(pattern)
+		matches := regex.FindAllStringSubmatch(text, -1)
+		for _, match := range matches {
+			if len(match) > 1 && match[1] != "" {
+				dependencies = append(dependencies, match[1])
+			}
+		}
+	}
+
+	// Remove duplicates
+	seen := make(map[string]bool)
+	var uniqueDeps []string
+	for _, dep := range dependencies {
+		if !seen[dep] {
+			seen[dep] = true
+			uniqueDeps = append(uniqueDeps, dep)
+		}
+	}
+
+	return uniqueDeps
+}
+
+// scanTestCoverage performs test coverage analysis and stores results in knowledge graph
+func (s *Scanner) scanTestCoverage(ctx context.Context) error {
+	log.Println("  📊 Scanning test coverage...")
+
+	// Determine project type and run appropriate coverage command
+	var coverageData map[string]interface{}
+
+	if _, err := os.Stat(filepath.Join(s.config.ProjectPath, "go.mod")); err == nil {
+		coverageData, err = s.scanGoCoverage(ctx)
+		if err != nil {
+			log.Printf("  ⚠️  Go coverage scan failed: %v", err)
+			return nil // Don't fail the entire scan
+		}
+	} else if _, err := os.Stat(filepath.Join(s.config.ProjectPath, "package.json")); err == nil {
+		coverageData, err = s.scanNodeCoverage(ctx)
+		if err != nil {
+			log.Printf("  ⚠️  Node.js coverage scan failed: %v", err)
+			return nil
+		}
+	} else if _, err := os.Stat(filepath.Join(s.config.ProjectPath, "requirements.txt")); err == nil {
+		coverageData, err = s.scanPythonCoverage(ctx)
+		if err != nil {
+			log.Printf("  ⚠️  Python coverage scan failed: %v", err)
+			return nil
+		}
+	} else {
+		log.Println("  ⚠️  No supported project type found for coverage analysis")
+		return nil
+	}
+
+	// Store coverage data in knowledge graph
+	if coverageData != nil {
+		// Create a coverage node
+		coverageNode := &types.Node{
+			ID:   "coverage_analysis",
+			Type: types.NodeTypeCode, // Using code type for coverage data
+			Name: "Test Coverage",
+			Path: "coverage",
+			Metadata: map[string]interface{}{
+				"coverage_data": coverageData,
+				"scan_time":     time.Now(),
+			},
+		}
+		s.graph.Nodes[coverageNode.ID] = coverageNode
+
+		log.Printf("  📊 Coverage scan complete: %.1f%% coverage", coverageData["overall_coverage"].(float64))
+	}
+
+	return nil
+}
+
+// scanGoCoverage runs Go test coverage analysis
+func (s *Scanner) scanGoCoverage(ctx context.Context) (map[string]interface{}, error) {
+	_ = ctx // Acknowledge context for future use
+
+	// Run go test with coverage
+	cmd := exec.Command("go", "test", "-coverprofile=coverage.out", "./...")
+	cmd.Dir = s.config.ProjectPath
+	_, err := cmd.CombinedOutput()
+	if err != nil {
+		// Some packages might not have tests, which is okay
+		log.Printf("  ⚠️  Go test failed (some packages may not have tests): %v", err)
+	}
+
+	// Parse coverage output
+	coverageFile := filepath.Join(s.config.ProjectPath, "coverage.out")
+	if _, err := os.Stat(coverageFile); err != nil {
+		return map[string]interface{}{
+			"overall_coverage": 0.0,
+			"lines_covered":    0,
+			"total_lines":      0,
+			"test_files":       0,
+		}, nil
+	}
+
+	// Read and parse coverage file
+	content, err := os.ReadFile(coverageFile)
+	if err != nil {
+		return nil, err
+	}
+
+	lines := strings.Split(string(content), "\n")
+	totalLines := 0
+	coveredLines := 0
+
+	// Count total and covered lines
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "mode:") {
+			continue
+		}
+
+		parts := strings.Fields(line)
+		if len(parts) >= 3 {
+			// Parse coverage count (number of times line was executed)
+			count := 0
+			fmt.Sscanf(parts[2], "%d", &count)
+			totalLines++
+
+			if count > 0 {
+				coveredLines++
+			}
+		}
+	}
+
+	// Calculate coverage percentage
+	var coveragePercent float64
+	if totalLines > 0 {
+		coveragePercent = (float64(coveredLines) / float64(totalLines)) * 100
+	}
+
+	// Count test files
+	testFiles := 0
+	err = filepath.Walk(s.config.ProjectPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if strings.HasSuffix(path, "_test.go") {
+			testFiles++
+		}
+		return nil
+	})
+
+	if err != nil {
+		log.Printf("  ⚠️  Failed to count test files: %v", err)
+	}
+
+	// Clean up coverage file
+	os.Remove(coverageFile)
+
+	return map[string]interface{}{
+		"overall_coverage": coveragePercent,
+		"lines_covered":    coveredLines,
+		"total_lines":      totalLines,
+		"test_files":       testFiles,
+		"language":         "go",
+	}, nil
+}
+
+// scanNodeCoverage runs Node.js test coverage analysis
+func (s *Scanner) scanNodeCoverage(ctx context.Context) (map[string]interface{}, error) {
+	_ = ctx // Acknowledge context for future use
+
+	// Check if Jest or other testing framework is available
+	var cmd *exec.Cmd
+
+	// Try Jest first
+	if s.hasJestConfig() {
+		cmd = exec.Command("npx", "jest", "--coverage", "--coverageReporters=json")
+	} else if s.hasVitestConfig() {
+		cmd = exec.Command("npx", "vitest", "run", "--coverage")
+	} else {
+		// Fallback to basic test command
+		cmd = exec.Command("npm", "test")
+	}
+
+	cmd.Dir = s.config.ProjectPath
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("  ⚠️  Node.js test failed: %v", err)
+		log.Printf("  Output: %s", string(output))
+		// Return zero coverage data instead of failing
+		return map[string]interface{}{
+			"overall_coverage": 0.0,
+			"lines_covered":    0,
+			"total_lines":      0,
+			"test_files":       0,
+		}, nil
+	}
+
+	// Log successful test output for debugging
+	log.Printf("  ✅ Node.js tests completed successfully")
+
+	// Try to read coverage report
+	coverageReport := filepath.Join(s.config.ProjectPath, "coverage", "coverage-final.json")
+	if _, err := os.Stat(coverageReport); err != nil {
+		// Try alternative locations
+		coverageReport = filepath.Join(s.config.ProjectPath, "coverage.json")
+		if _, err := os.Stat(coverageReport); err != nil {
+			return map[string]interface{}{
+				"overall_coverage": 0.0,
+				"lines_covered":    0,
+				"total_lines":      0,
+				"test_files":       0,
+			}, nil
+		}
+	}
+
+	// Parse coverage report
+	content, err := os.ReadFile(coverageReport)
+	if err != nil {
+		return nil, err
+	}
+
+	var coverage map[string]interface{}
+	if err := json.Unmarshal(content, &coverage); err != nil {
+		return nil, err
+	}
+
+	// Extract coverage data
+	totalLines := 0
+	coveredLines := 0
+
+	// Parse Jest/Vitest coverage format
+	if coverageData, ok := coverage["total"].(map[string]interface{}); ok {
+		if lines, ok := coverageData["lines"].(map[string]interface{}); ok {
+			if total, ok := lines["total"].(float64); ok {
+				totalLines = int(total)
+			}
+			if covered, ok := lines["covered"].(float64); ok {
+				coveredLines = int(covered)
+			}
+		}
+	}
+
+	var coveragePercent float64
+	if totalLines > 0 {
+		coveragePercent = (float64(coveredLines) / float64(totalLines)) * 100
+	}
+
+	// Count test files
+	testFiles := 0
+	testPatterns := []string{"**/*.test.js", "**/*.test.ts", "**/*.spec.js", "**/*.spec.ts"}
+	for _, pattern := range testPatterns {
+		matches, _ := filepath.Glob(filepath.Join(s.config.ProjectPath, pattern))
+		testFiles += len(matches)
+	}
+
+	return map[string]interface{}{
+		"overall_coverage": coveragePercent,
+		"lines_covered":    coveredLines,
+		"total_lines":      totalLines,
+		"test_files":       testFiles,
+		"language":         "javascript",
+		"raw_output":       string(output),
+	}, nil
+}
+
+// scanPythonCoverage runs Python test coverage analysis
+func (s *Scanner) scanPythonCoverage(ctx context.Context) (map[string]interface{}, error) {
+	_ = ctx // Acknowledge context for future use
+
+	// Check if pytest is available
+	cmd := exec.Command("python", "-m", "pytest", "--cov=.", "--cov-report=json", "--cov-report=term-missing")
+	cmd.Dir = s.config.ProjectPath
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("  ⚠️  Python test failed: %v", err)
+		return map[string]interface{}{
+			"overall_coverage": 0.0,
+			"lines_covered":    0,
+			"total_lines":      0,
+			"test_files":       0,
+		}, nil
+	}
+
+	// Try to read coverage report
+	coverageReport := filepath.Join(s.config.ProjectPath, "coverage.json")
+	if _, err := os.Stat(coverageReport); err != nil {
+		return map[string]interface{}{
+			"overall_coverage": 0.0,
+			"lines_covered":    0,
+			"total_lines":      0,
+			"test_files":       0,
+		}, nil
+	}
+
+	// Parse coverage report
+	content, err := os.ReadFile(coverageReport)
+	if err != nil {
+		return nil, err
+	}
+
+	var coverage map[string]interface{}
+	if err := json.Unmarshal(content, &coverage); err != nil {
+		return nil, err
+	}
+
+	// Extract coverage data from pytest-cov format
+	totalLines := 0
+	coveredLines := 0
+
+	if totals, ok := coverage["totals"].(map[string]interface{}); ok {
+		if lines, ok := totals["lines"].(map[string]interface{}); ok {
+			if total, ok := lines["total"].(float64); ok {
+				totalLines = int(total)
+			}
+			if covered, ok := lines["covered"].(float64); ok {
+				coveredLines = int(covered)
+			}
+		}
+	}
+
+	var coveragePercent float64
+	if totalLines > 0 {
+		coveragePercent = (float64(coveredLines) / float64(totalLines)) * 100
+	}
+
+	// Count test files
+	testFiles := 0
+	testPatterns := []string{"**/test_*.py", "**/*_test.py"}
+	for _, pattern := range testPatterns {
+		matches, _ := filepath.Glob(filepath.Join(s.config.ProjectPath, pattern))
+		testFiles += len(matches)
+	}
+
+	return map[string]interface{}{
+		"overall_coverage": coveragePercent,
+		"lines_covered":    coveredLines,
+		"total_lines":      totalLines,
+		"test_files":       testFiles,
+		"language":         "python",
+		"raw_output":       string(output),
+	}, nil
+}
+
+// Helper functions for coverage scanning
+
+func (s *Scanner) hasJestConfig() bool {
+	configFiles := []string{"jest.config.js", "jest.config.ts", "jest.config.json"}
+	for _, file := range configFiles {
+		if _, err := os.Stat(filepath.Join(s.config.ProjectPath, file)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Scanner) hasVitestConfig() bool {
+	configFiles := []string{"vitest.config.js", "vitest.config.ts", "vite.config.ts"}
+	for _, file := range configFiles {
+		if _, err := os.Stat(filepath.Join(s.config.ProjectPath, file)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// ============================================================================
+// CVE SCANNER
+// ============================================================================
+
+// CVEScanner handles querying CVE databases like the NVD
+type CVEScanner struct {
+	httpClient *http.Client
+	apiKey     string // For NVD API v2
+	baseURL    string
+}
+
+// NewCVEScanner creates a new CVE scanner
+func NewCVEScanner(apiKey string) *CVEScanner {
+	return &CVEScanner{
+		httpClient: &http.Client{Timeout: 30 * time.Second},
+		apiKey:     apiKey,
+		baseURL:    "https://services.nvd.nist.gov/rest/json/cves/2.0",
+	}
+}
+
+// QueryNVD queries the National Vulnerability Database for a given package
+func (cs *CVEScanner) QueryNVD(packageName, version string) ([]types.SecurityVulnerability, error) {
+	log.Printf("  🔍 Querying NVD for vulnerabilities in %s@%s...", packageName, version)
+
+	// Construct NVD API URL for keyword search
+	// Note: NVD API doesn't directly support package name search, but we can search by keyword
+	url := fmt.Sprintf("%s?keyword=%s&resultsPerPage=20", cs.baseURL, packageName)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Add API key if provided (NVD API v2.0 doesn't require API key for basic queries)
+	if cs.apiKey != "" {
+		req.Header.Set("apiKey", cs.apiKey)
+	}
+
+	resp, err := cs.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query NVD: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("NVD API returned status %d", resp.StatusCode)
+	}
+
+	// Parse NVD response
+	var nvdResponse map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&nvdResponse); err != nil {
+		return nil, fmt.Errorf("failed to parse NVD response: %w", err)
+	}
+
+	// Extract vulnerabilities from response
+	vulnerabilities, err := cs.parseNVDResponse(nvdResponse, packageName, version)
+	if err != nil {
+		log.Printf("  ⚠️  Failed to parse NVD response: %v", err)
+		return []types.SecurityVulnerability{}, nil
+	}
+
+	log.Printf("  📊 Found %d vulnerabilities for %s@%s", len(vulnerabilities), packageName, version)
+	return vulnerabilities, nil
+}
+
+// parseNVDResponse extracts vulnerability information from NVD API response
+func (cs *CVEScanner) parseNVDResponse(response map[string]interface{}, packageName, version string) ([]types.SecurityVulnerability, error) {
+	var vulnerabilities []types.SecurityVulnerability
+
+	// Navigate to vulnerabilities array in NVD response
+	vulnData, ok := response["vulnerabilities"].([]interface{})
+	if !ok {
+		return vulnerabilities, nil
+	}
+
+	for _, item := range vulnData {
+		vulnMap, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		cve, ok := vulnMap["cve"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Extract CVE ID
+		id := ""
+		if idMap, ok := cve["id"].(string); ok {
+			id = idMap
+		}
+
+		// Extract description
+		description := ""
+		if descArray, ok := cve["descriptions"].([]interface{}); ok && len(descArray) > 0 {
+			if descMap, ok := descArray[0].(map[string]interface{}); ok {
+				if desc, ok := descMap["value"].(string); ok {
+					description = desc
+				}
+			}
+		}
+
+		// Extract CVSS metrics
+		cvss := 0.0
+		severity := "unknown"
+		if metrics, ok := cve["metrics"].(map[string]interface{}); ok {
+			if cvssData, ok := metrics["cvssMetricV31"].([]interface{}); ok && len(cvssData) > 0 {
+				if cvssMap, ok := cvssData[0].(map[string]interface{}); ok {
+					if baseData, ok := cvssMap["cvssData"].(map[string]interface{}); ok {
+						if baseScore, ok := baseData["baseScore"].(float64); ok {
+							cvss = baseScore
+						}
+						if severityData, ok := baseData["baseSeverity"].(string); ok {
+							severity = severityData
+						}
+					}
+				}
+			}
+		}
+
+		// Only include vulnerabilities that match our package
+		if cs.isRelevantVulnerability(description, packageName) {
+			vuln := types.SecurityVulnerability{
+				CVE:         id,
+				Package:     packageName,
+				Version:     version,
+				Severity:    severity,
+				Description: description,
+				FixVersion:  "latest", // NVD doesn't provide fix versions directly
+				CVSS:        cvss,
+			}
+			vulnerabilities = append(vulnerabilities, vuln)
+		}
+	}
+
+	return vulnerabilities, nil
+}
+
+// isRelevantVulnerability checks if a vulnerability description mentions the package
+func (cs *CVEScanner) isRelevantVulnerability(description, packageName string) bool {
+	// Simple heuristic: check if package name appears in description
+	// In a real implementation, this would use more sophisticated matching
+	descLower := strings.ToLower(description)
+	packageLower := strings.ToLower(packageName)
+
+	// Check for exact package name match
+	if strings.Contains(descLower, packageLower) {
+		return true
+	}
+
+	// Check for common package name variations
+	parts := strings.Split(packageName, "/")
+	if len(parts) > 0 {
+		packageBaseName := strings.ToLower(parts[len(parts)-1])
+		if strings.Contains(descLower, packageBaseName) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// ============================================================================
+// RUNTIME SCANNER
+// ============================================================================
+
+// RuntimeScanner inspects live system runtime for processes, connections, and resource usage
+type RuntimeScanner struct{}
+
+// NewRuntimeScanner creates a new runtime scanner instance
+func NewRuntimeScanner() *RuntimeScanner {
+	return &RuntimeScanner{}
+}
+
+// ScanSystem performs comprehensive runtime inspection of the host system
+func (rs *RuntimeScanner) ScanSystem() ([]*types.Node, []*types.Node, error) {
+	var processNodes []*types.Node
+	var connectionNodes []*types.Node
+
+	// Scan running processes
+	processes, err := rs.scanProcesses()
+	if err != nil {
+		log.Printf("  ⚠️  Failed to scan processes: %v", err)
+	} else {
+		processNodes = append(processNodes, processes...)
+	}
+
+	// Scan network connections
+	connections, err := rs.scanNetworkConnections()
+	if err != nil {
+		log.Printf("  ⚠️  Failed to scan network connections: %v", err)
+	} else {
+		connectionNodes = append(connectionNodes, connections...)
+	}
+
+	// Scan system resources (CPU, Memory, Disk)
+	resourceNodes, err := rs.scanSystemResources()
+	if err != nil {
+		log.Printf("  ⚠️  Failed to scan system resources: %v", err)
+	} else {
+		processNodes = append(processNodes, resourceNodes...)
+	}
+
+	log.Printf("  📊 Runtime scan found: %d processes, %d connections, %d resource nodes",
+		len(processNodes), len(connectionNodes), len(resourceNodes))
+
+	return processNodes, connectionNodes, nil
+}
+
+// scanProcesses inspects all running processes on the system
+func (rs *RuntimeScanner) scanProcesses() ([]*types.Node, error) {
+	var nodes []*types.Node
+
+	processes, err := process.Processes()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get processes: %w", err)
+	}
+
+	for _, proc := range processes {
+		name, err := proc.Name()
+		if err != nil {
+			continue // Skip processes we can't read
+		}
+
+		cmdLine, _ := proc.Cmdline()
+		exe, _ := proc.Exe()
+		cpuPercent, _ := proc.CPUPercent()
+		memoryInfo, _ := proc.MemoryInfo()
+
+		node := &types.Node{
+			ID:   fmt.Sprintf("process_%d", proc.Pid),
+			Type: types.NodeTypeProcess,
+			Name: name,
+			Path: exe,
+			Metadata: map[string]interface{}{
+				"pid":         proc.Pid,
+				"cmdline":     cmdLine,
+				"cpu_percent": cpuPercent,
+				"status":      "running",
+			},
+		}
+
+		if memoryInfo != nil {
+			node.Metadata["memory_rss"] = memoryInfo.RSS
+			node.Metadata["memory_vms"] = memoryInfo.VMS
+		}
+
+		nodes = append(nodes, node)
+	}
+
+	return nodes, nil
+}
+
+// scanNetworkConnections inspects active network connections
+func (rs *RuntimeScanner) scanNetworkConnections() ([]*types.Node, error) {
+	var nodes []*types.Node
+
+	connections, err := net.Connections("all")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get network connections: %w", err)
+	}
+
+	// Group connections by local address to create network nodes
+	connectionMap := make(map[string]*types.Node)
+
+	for _, conn := range connections {
+		localAddr := fmt.Sprintf("%s:%d", conn.Laddr.IP, conn.Laddr.Port)
+		remoteAddr := fmt.Sprintf("%s:%d", conn.Raddr.IP, conn.Raddr.Port)
+
+		if existingNode, exists := connectionMap[localAddr]; exists {
+			// Add to existing connection node
+			if conns, ok := existingNode.Metadata["connections"].([]map[string]interface{}); ok {
+				conns = append(conns, map[string]interface{}{
+					"remote_address": remoteAddr,
+					"status":         conn.Status,
+					"protocol":       getProtocolName(conn.Type),
+				})
+				existingNode.Metadata["connections"] = conns
+			}
+		} else {
+			// Create new connection node
+			node := &types.Node{
+				ID:   fmt.Sprintf("connection_%s", localAddr),
+				Type: types.NodeTypeConnection,
+				Name: fmt.Sprintf("Connection %s", localAddr),
+				Path: localAddr,
+				Metadata: map[string]interface{}{
+					"local_address": localAddr,
+					"connections": []map[string]interface{}{
+						{
+							"remote_address": remoteAddr,
+							"status":         conn.Status,
+							"protocol":       getProtocolName(conn.Type),
+						},
+					},
+				},
+			}
+			connectionMap[localAddr] = node
+			nodes = append(nodes, node)
+		}
+	}
+
+	return nodes, nil
+}
+
+// scanSystemResources scans system-wide resource utilization
+func (rs *RuntimeScanner) scanSystemResources() ([]*types.Node, error) {
+	var nodes []*types.Node
+
+	// CPU information
+	cpuPercent, err := cpu.Percent(0, false)
+	if err == nil && len(cpuPercent) > 0 {
+		node := &types.Node{
+			ID:   "resource_cpu",
+			Type: types.NodeTypeProcess, // Using process type for system resources
+			Name: "CPU Usage",
+			Path: "system",
+			Metadata: map[string]interface{}{
+				"resource_type": "cpu",
+				"usage_percent": cpuPercent[0],
+			},
+		}
+		nodes = append(nodes, node)
+	}
+
+	// Memory information
+	memInfo, err := mem.VirtualMemory()
+	if err == nil {
+		node := &types.Node{
+			ID:   "resource_memory",
+			Type: types.NodeTypeProcess,
+			Name: "Memory Usage",
+			Path: "system",
+			Metadata: map[string]interface{}{
+				"resource_type":   "memory",
+				"total_bytes":     memInfo.Total,
+				"available_bytes": memInfo.Available,
+				"used_bytes":      memInfo.Used,
+				"usage_percent":   memInfo.UsedPercent,
+			},
+		}
+		nodes = append(nodes, node)
+	}
+
+	// Disk information
+	diskInfo, err := disk.Usage("/")
+	if err == nil {
+		node := &types.Node{
+			ID:   "resource_disk",
+			Type: types.NodeTypeProcess,
+			Name: "Disk Usage",
+			Path: "system",
+			Metadata: map[string]interface{}{
+				"resource_type": "disk",
+				"total_bytes":   diskInfo.Total,
+				"free_bytes":    diskInfo.Free,
+				"used_bytes":    diskInfo.Used,
+				"usage_percent": diskInfo.UsedPercent,
+			},
+		}
+		nodes = append(nodes, node)
+	}
+
+	return nodes, nil
+}
+
+// getProtocolName converts connection type number to protocol name
+func getProtocolName(connType uint32) string {
+	switch connType {
+	case 1:
+		return "TCP"
+	case 2:
+		return "UDP"
+	default:
+		return fmt.Sprintf("Type_%d", connType)
+	}
+}
+
 // ============================================================================
 // RISK DIAGNOSIS
 // ============================================================================
 
 type RiskDiagnoser struct {
-	scanner *Scanner
-	ai      *AIInferenceEngine
+	scanner      *Scanner
+	ai           *AIInferenceEngine
+	codacyClient *CodacyClient
 }
 
-func NewRiskDiagnoser(scanner *Scanner) *RiskDiagnoser {
+func NewRiskDiagnoser(scanner *Scanner, codacyClient *CodacyClient) *RiskDiagnoser {
 	return &RiskDiagnoser{
-		scanner: scanner,
-		ai:      scanner.ai,
+		scanner:      scanner,
+		ai:           scanner.ai,
+		codacyClient: codacyClient,
 	}
 }
 
@@ -431,6 +1397,21 @@ func (rd *RiskDiagnoser) DiagnoseRisks(ctx context.Context) (*types.RiskAssessme
 		Timestamp:             time.Now(),
 	}
 
+	// Fetch Codacy issues if client is available
+	if rd.codacyClient != nil {
+		codacyIssues, err := rd.codacyClient.GetIssues()
+		if err != nil {
+			log.Printf("  ⚠️  Failed to fetch Codacy issues: %v", err)
+		} else {
+			log.Printf("  🔗 Integrating %d Codacy issues into risk assessment", len(codacyIssues))
+			for _, codacyIssue := range codacyIssues {
+				// Convert Codacy issue to technical debt item
+				debtItem := rd.codacyClient.ConvertCodacyIssueToTechnicalDebt(codacyIssue)
+				assessment.TechnicalDebt = append(assessment.TechnicalDebt, debtItem)
+			}
+		}
+	}
+
 	// Use Gemini for comprehensive risk analysis
 	riskData := rd.prepareRiskAnalysisData()
 	risks, err := rd.ai.AnalyzeRisks(ctx, riskData, AIProviderGemini)
@@ -438,17 +1419,23 @@ func (rd *RiskDiagnoser) DiagnoseRisks(ctx context.Context) (*types.RiskAssessme
 		return nil, fmt.Errorf("risk analysis failed: %w", err)
 	}
 
-	// Parse and categorize risks
-	assessment.TechnicalDebt = rd.extractTechnicalDebt(risks)
-	assessment.SecurityVulns = rd.extractSecurityVulns(risks)
-	assessment.ObsoleteCode = rd.extractObsoleteCode(risks)
-	assessment.DangerousDependencies = rd.extractDependencyRisks(risks)
+	// Parse and categorize risks from AI analysis
+	aiTechnicalDebt := rd.extractTechnicalDebt(risks)
+	aiSecurityVulns := rd.extractSecurityVulns(risks)
+	aiObsoleteCode := rd.extractObsoleteCode(risks)
+	aiDependencyRisks := rd.extractDependencyRisks(risks)
+
+	// Merge AI results with Codacy results (avoiding duplicates)
+	assessment.TechnicalDebt = append(assessment.TechnicalDebt, aiTechnicalDebt...)
+	assessment.SecurityVulns = aiSecurityVulns
+	assessment.ObsoleteCode = aiObsoleteCode
+	assessment.DangerousDependencies = aiDependencyRisks
 
 	// Calculate overall risk score
 	assessment.OverallScore = rd.calculateOverallRisk(assessment)
 
-	log.Printf("  ⚠️  Found: %d technical debt items, %d security vulnerabilities, %d obsolete code items",
-		len(assessment.TechnicalDebt), len(assessment.SecurityVulns), len(assessment.ObsoleteCode))
+	log.Printf("  ⚠️  Found: %d technical debt items (%d from Codacy, %d from AI), %d security vulnerabilities, %d obsolete code items",
+		len(assessment.TechnicalDebt), len(assessment.TechnicalDebt)-len(aiTechnicalDebt), len(aiTechnicalDebt), len(assessment.SecurityVulns), len(assessment.ObsoleteCode))
 
 	return assessment, nil
 }
@@ -584,7 +1571,7 @@ type Relationship struct {
 	Metadata   map[string]interface{}
 }
 
-func NewAIInferenceEngine(config *AIProviderConfig) *AIInferenceEngine {
+func NewAIInferenceEngine(config *Config) *AIInferenceEngine {
 	log.Println("🧠 Initializing Multi-Model AI Inference Engine...")
 
 	// The inference service needs a DB accessor, but doesn't use it. We can pass nil.
@@ -595,34 +1582,35 @@ func NewAIInferenceEngine(config *AIProviderConfig) *AIInferenceEngine {
 
 	// Dynamically build the list of available LLMs from the application's configuration
 	var attemptConfigs []inference_engine.LLMAttemptConfig
-	if config.Cerebras.APIKey != "" {
+	if config.AIProviders.Cerebras.APIKey != "" {
 		attemptConfigs = append(attemptConfigs, inference_engine.LLMAttemptConfig{
-			ProviderName: "cerebras", ModelName: config.Cerebras.Model, APIKeyEnvVar: "CEREBRAS_API_KEY", MaxTokens: 4000, IsPrimary: true,
+			ProviderName: "cerebras", ModelName: config.AIProviders.Cerebras.Model, APIKeyEnvVar: "CEREBRAS_API_KEY", MaxTokens: 4000, IsPrimary: true,
 		})
 	}
-	if config.Gemini.APIKey != "" {
+	if config.AIProviders.Gemini.APIKey != "" {
 		attemptConfigs = append(attemptConfigs, inference_engine.LLMAttemptConfig{
-			ProviderName: "gemini", ModelName: config.Gemini.Model, APIKeyEnvVar: "GEMINI_API_KEY", MaxTokens: 100000, IsPrimary: false,
+			ProviderName: "gemini", ModelName: config.AIProviders.Gemini.Model, APIKeyEnvVar: "GEMINI_API_KEY", MaxTokens: 100000, IsPrimary: false,
 		})
 	}
-	if config.DeepSeek.APIKey != "" {
+	if config.AIProviders.DeepSeek.APIKey != "" {
 		attemptConfigs = append(attemptConfigs, inference_engine.LLMAttemptConfig{
-			ProviderName: "deepseek", ModelName: config.DeepSeek.Model, APIKeyEnvVar: "DEEPSEEK_API_KEY", MaxTokens: 8000, IsPrimary: false,
+			ProviderName: "deepseek", ModelName: config.AIProviders.DeepSeek.Model, APIKeyEnvVar: "DEEPSEEK_API_KEY", MaxTokens: 8000, IsPrimary: false,
 		})
 	}
-	if config.Anthropic.APIKey != "" {
+	if config.AIProviders.Anthropic.APIKey != "" {
 		attemptConfigs = append(attemptConfigs, inference_engine.LLMAttemptConfig{
-			ProviderName: "anthropic", ModelName: config.Anthropic.Model, APIKeyEnvVar: "ANTHROPIC_API_KEY", MaxTokens: 4000, IsPrimary: false,
+			ProviderName: "anthropic", ModelName: config.AIProviders.Anthropic.Model, APIKeyEnvVar: "ANTHROPIC_API_KEY", MaxTokens: 4000, IsPrimary: false,
 		})
 	}
-	if config.OpenAI.APIKey != "" {
+	if config.AIProviders.OpenAI.APIKey != "" {
 		attemptConfigs = append(attemptConfigs, inference_engine.LLMAttemptConfig{
-			ProviderName: "openai", ModelName: config.OpenAI.Model, APIKeyEnvVar: "OPENAI_API_KEY", MaxTokens: 4000, IsPrimary: false,
+			ProviderName: "openai", ModelName: config.AIProviders.OpenAI.Model, APIKeyEnvVar: "OPENAI_API_KEY", MaxTokens: 4000, IsPrimary: false,
 		})
 	}
 
 	// Start the service with the dynamic configuration
-	err = service.StartWithConfig(attemptConfigs)
+	// Pass the orchestrator config to the service
+	err = service.StartWithConfig(attemptConfigs, config.Orchestrator.PlannerModel, config.Orchestrator.ExecutorModels, config.Orchestrator.FinalizerModel, config.Orchestrator.VerifierModel)
 	if err != nil {
 		log.Fatalf("❌ Failed to start inference service: %v", err)
 	}
@@ -726,6 +1714,23 @@ func (ai *AIInferenceEngine) GenerateRemediation(ctx context.Context, issue inte
 	return response, nil
 }
 
+// GenerateRemediationWithOrchestrator uses the multi-step TaskOrchestrator to generate a fix.
+func (ai *AIInferenceEngine) GenerateRemediationWithOrchestrator(ctx context.Context, issue interface{}) (string, error) {
+	issueJSON, err := json.Marshal(issue)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal issue for orchestrator: %w", err)
+	}
+
+	// Create a complex prompt that gives the orchestrator the full context to plan and execute a fix.
+	complexPrompt := fmt.Sprintf(
+		"Generate a code patch or full file replacement to fix the following issue. Plan the change, generate the code, and format the final output as a patch or complete file.\n\n--- ISSUE ---\n%s\n--- END ISSUE ---",
+		string(issueJSON),
+	)
+
+	// Delegate the entire complex task to the orchestrator.
+	return ai.service.ExecuteComplexTask(ctx, complexPrompt)
+}
+
 // ============================================================================
 // AUTOMATED REMEDIATION
 // ============================================================================
@@ -768,7 +1773,7 @@ func (r *Remediator) RemediateRisks(ctx context.Context, assessment *types.RiskA
 
 	// Update dependencies
 	for _, dep := range assessment.DangerousDependencies {
-		if err := r.updateDependency(ctx, dep); err != nil {
+		if err := r.updateDependency(dep); err != nil {
 			log.Printf("  ⚠️  Failed to update %s: %v", dep.Package, err)
 			continue
 		}
@@ -797,6 +1802,13 @@ func (r *Remediator) RemediateRisks(ctx context.Context, assessment *types.RiskA
 		}
 	}
 
+	// Advanced Codacy integration: Manage toolchain configuration
+	if r.diagnoser.codacyClient != nil {
+		if err := r.manageCodacyConfiguration(ctx, assessment); err != nil {
+			log.Printf("  ⚠️  Failed to manage Codacy configuration: %v", err)
+		}
+	}
+
 	// Commit and push changes
 	if remediationCount > 0 {
 		commitMsg := fmt.Sprintf("🤖 Automated remediation: Fixed %d issues\n\n", remediationCount)
@@ -820,16 +1832,13 @@ func (r *Remediator) RemediateRisks(ctx context.Context, assessment *types.RiskA
 func (r *Remediator) remediateSecurityVuln(ctx context.Context, vuln types.SecurityVulnerability) error {
 	log.Printf("  🔒 Remediating %s in %s...", vuln.CVE, vuln.Package)
 
-	// Use configured code remediation provider
-	provider := r.getRemediationProvider()
-
-	fix, err := r.ai.GenerateRemediation(ctx, map[string]interface{}{
-		"type":        "security_vulnerability",
-		"cve":         vuln.CVE,
-		"package":     vuln.Package,
-		"version":     vuln.Version,
-		"fix_version": vuln.FixVersion,
-	}, provider)
+	// Use the TaskOrchestrator for a more robust, multi-step remediation process.
+	fix, err := r.ai.GenerateRemediationWithOrchestrator(ctx, map[string]interface{}{
+		"type":    "security_vulnerability",
+		"cve":     vuln.CVE,
+		"package": vuln.Package,
+		"version": vuln.Version,
+	})
 
 	if err != nil {
 		return err
@@ -839,8 +1848,8 @@ func (r *Remediator) remediateSecurityVuln(ctx context.Context, vuln types.Secur
 	return r.applyFix(fix, vuln.Package)
 }
 
-func (r *Remediator) updateDependency(ctx context.Context, dep types.DependencyRisk) error {
-	_ = ctx // Acknowledge context for future use in command execution
+// updateDependency updates a dependency to the latest version
+func (r *Remediator) updateDependency(dep types.DependencyRisk) error {
 	log.Printf("  📦 Updating %s from %s to %s...", dep.Package, dep.CurrentVersion, dep.LatestVersion)
 
 	// Determine package manager and update
@@ -924,14 +1933,13 @@ func (r *Remediator) removeObsoleteCode(ctx context.Context, obsolete types.Obso
 func (r *Remediator) fixTechnicalDebt(ctx context.Context, debt types.TechnicalDebtItem) error {
 	log.Printf("  🔨 Fixing technical debt: %s...", debt.ID)
 
-	provider := r.getRemediationProvider()
-
-	fix, err := r.ai.GenerateRemediation(ctx, map[string]interface{}{
+	// Use the TaskOrchestrator for a more robust, multi-step remediation process.
+	fix, err := r.ai.GenerateRemediationWithOrchestrator(ctx, map[string]interface{}{
 		"type":        "technical_debt",
 		"location":    debt.Location,
 		"description": debt.Description,
 		"remediation": debt.Remediation,
-	}, provider)
+	})
 
 	if err != nil {
 		return err
@@ -975,17 +1983,165 @@ func (r *Remediator) applyFix(fix, target string) error {
 	return os.WriteFile(absPath, []byte(fix), 0644)
 }
 
-func (r *Remediator) getRemediationProvider() AIProviderType {
-	switch r.config.AIProviders.CodeRemediationProvider {
-	case "anthropic":
-		return AIProviderAnthropic
-	case "openai":
-		return AIProviderOpenAI
-	case "deepseek":
-		return AIProviderDeepSeek
-	default:
-		return AIProviderAnthropic // Default to Claude
+// manageCodacyConfiguration handles advanced Codacy toolchain management
+func (r *Remediator) manageCodacyConfiguration(ctx context.Context, assessment *types.RiskAssessment) error {
+	log.Println("  🔧 Managing Codacy configuration...")
+
+	// Analyze technical debt items to identify potential false positives
+	falsePositiveCandidates := r.identifyFalsePositiveCandidates(assessment)
+
+	if len(falsePositiveCandidates) == 0 {
+		log.Println("  ✅ No false positive candidates identified")
+		return nil
 	}
+
+	// Get current Codacy rules
+	rules, err := r.diagnoser.codacyClient.GetRules()
+	if err != nil {
+		return fmt.Errorf("failed to fetch Codacy rules: %w", err)
+	}
+
+	// Identify rules that should be disabled
+	rulesToDisable := r.identifyRulesToDisable(rules, falsePositiveCandidates)
+
+	disabledCount := 0
+	for _, rule := range rulesToDisable {
+		if err := r.diagnoser.codacyClient.UpdateRule(rule.ID, false, rule.Severity); err != nil {
+			log.Printf("  ⚠️  Failed to disable Codacy rule %s: %v", rule.ID, err)
+			continue
+		}
+		disabledCount++
+		log.Printf("  🔕 Disabled Codacy rule: %s (%s)", rule.Name, rule.ID)
+	}
+
+	if disabledCount > 0 {
+		log.Printf("  ✅ Disabled %d Codacy rules to reduce false positives", disabledCount)
+	} else {
+		log.Println("  ✅ No rules needed to be disabled")
+	}
+
+	return nil
+}
+
+// identifyFalsePositiveCandidates analyzes technical debt items to find potential false positives
+func (r *Remediator) identifyFalsePositiveCandidates(assessment *types.RiskAssessment) []types.TechnicalDebtItem {
+	var candidates []types.TechnicalDebtItem
+
+	for _, debt := range assessment.TechnicalDebt {
+		// Look for patterns that might indicate false positives
+		isFalsePositiveCandidate := false
+
+		// Check if it's a Codacy-generated issue (starts with CODACY-)
+		if strings.HasPrefix(debt.ID, "CODACY-") {
+			// Check for common false positive patterns
+			lowerDesc := strings.ToLower(debt.Description)
+
+			// Pattern 1: Issues in generated code or vendor directories
+			if r.isInGeneratedOrVendorCode(debt.Location) {
+				isFalsePositiveCandidate = true
+			}
+
+			// Pattern 2: Issues that are consistently marked as low impact but high effort
+			if debt.Severity == "low" && debt.Effort > 3 {
+				isFalsePositiveCandidate = true
+			}
+
+			// Pattern 3: Issues with specific keywords that often indicate false positives
+			falsePositiveKeywords := []string{
+				"auto-generated",
+				"vendor/",
+				"node_modules/",
+				"third_party/",
+				"generated",
+				"protoc-gen",
+				"swagger generate",
+			}
+
+			for _, keyword := range falsePositiveKeywords {
+				if strings.Contains(lowerDesc, keyword) {
+					isFalsePositiveCandidate = true
+					break
+				}
+			}
+		}
+
+		if isFalsePositiveCandidate {
+			candidates = append(candidates, debt)
+		}
+	}
+
+	log.Printf("  🔍 Identified %d potential false positive candidates", len(candidates))
+	return candidates
+}
+
+// isInGeneratedOrVendorCode checks if a file location is in generated or vendor code
+func (r *Remediator) isInGeneratedOrVendorCode(location string) bool {
+	generatedPatterns := []string{
+		"vendor/",
+		"node_modules/",
+		"generated/",
+		"gen/",
+		"build/",
+		"dist/",
+		"target/",
+		"out/",
+		".git/",
+	}
+
+	locationLower := strings.ToLower(location)
+	for _, pattern := range generatedPatterns {
+		if strings.Contains(locationLower, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// identifyRulesToDisable maps false positive candidates to specific Codacy rules
+func (r *Remediator) identifyRulesToDisable(rules []CodacyRule, candidates []types.TechnicalDebtItem) []CodacyRule {
+	var rulesToDisable []CodacyRule
+
+	// Create a map of rule patterns to rules for quick lookup
+	ruleMap := make(map[string]*CodacyRule)
+	for _, rule := range rules {
+		ruleMap[rule.ID] = &rule
+		ruleMap[rule.Name] = &rule
+	}
+
+	// Analyze candidates to identify problematic rules
+	problematicRuleIDs := make(map[string]bool)
+
+	for _, candidate := range candidates {
+		// Extract rule information from the debt item description
+		// Format: "[RuleName] Category: Message"
+		if strings.Contains(candidate.Description, "[") && strings.Contains(candidate.Description, "]") {
+			start := strings.Index(candidate.Description, "[")
+			end := strings.Index(candidate.Description, "]")
+			if start != -1 && end != -1 && end > start {
+				ruleName := candidate.Description[start+1 : end]
+
+				// Look for the rule by name or pattern
+				for _, rule := range rules {
+					if strings.Contains(strings.ToLower(rule.Name), strings.ToLower(ruleName)) ||
+						strings.Contains(strings.ToLower(rule.Description), strings.ToLower(ruleName)) {
+						problematicRuleIDs[rule.ID] = true
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// Convert problematic rule IDs to rules
+	for _, rule := range rules {
+		if problematicRuleIDs[rule.ID] {
+			rulesToDisable = append(rulesToDisable, rule)
+		}
+	}
+
+	log.Printf("  🔍 Identified %d Codacy rules to disable", len(rulesToDisable))
+	return rulesToDisable
 }
 
 // ============================================================================
@@ -1063,18 +2219,19 @@ func (gm *GitManager) CommitAndPush(branchName, message string) error {
 }
 
 // ============================================================================
-// MAIN APPLICATION
+// GIT MANAGER
 // ============================================================================
 
 type ArchGuardian struct {
-	config     *Config
-	scanner    *Scanner
-	diagnoser  *RiskDiagnoser
-	remediator *Remediator
-	dataEngine *data_engine.DataEngine
+	config      *Config
+	scanner     *Scanner
+	diagnoser   *RiskDiagnoser
+	remediator  *Remediator
+	dataEngine  *data_engine.DataEngine
+	triggerScan chan bool // Channel to trigger manual scans
 }
 
-func NewArchGuardian(config *Config) *ArchGuardian {
+func NewArchGuardian(config *Config, aiEngine *AIInferenceEngine) *ArchGuardian {
 	var de *data_engine.DataEngine
 	if config.DataEngine.Enable {
 		log.Println("📈 Initializing Data Engine...")
@@ -1101,16 +2258,29 @@ func NewArchGuardian(config *Config) *ArchGuardian {
 		}
 	}
 
-	scanner := NewScanner(config)
-	diagnoser := NewRiskDiagnoser(scanner)
+	scanner := NewScanner(config, aiEngine)
+
+	// Initialize Codacy client if API token is provided
+	var codacyClient *CodacyClient
+	if codacyToken := getEnv("CODACY_API_TOKEN", ""); codacyToken != "" {
+		codacyProvider := getEnv("CODACY_PROVIDER", "gh") // Default to GitHub
+		codacyRepo := getEnv("CODACY_REPOSITORY", "")
+		if codacyRepo != "" {
+			codacyClient = NewCodacyClient(codacyToken, codacyProvider, codacyRepo)
+			log.Println("🔗 Codacy integration enabled")
+		}
+	}
+
+	diagnoser := NewRiskDiagnoser(scanner, codacyClient)
 	remediator := NewRemediator(config, diagnoser)
 
 	return &ArchGuardian{
-		config:     config,
-		scanner:    scanner,
-		diagnoser:  diagnoser,
-		remediator: remediator,
-		dataEngine: de,
+		config:      config,
+		scanner:     scanner,
+		diagnoser:   diagnoser,
+		remediator:  remediator,
+		dataEngine:  de,
+		triggerScan: make(chan bool), // Initialize the channel
 	}
 }
 
@@ -1119,21 +2289,24 @@ func (ag *ArchGuardian) Run(ctx context.Context) error {
 	log.Printf("📁 Project: %s", ag.config.ProjectPath)
 	log.Printf("🤖 AI Providers: Cerebras (fast), Gemini (reasoning), %s (remediation)",
 		ag.config.AIProviders.CodeRemediationProvider)
+	log.Println("✅ ArchGuardian is running. Waiting for scan trigger from API or periodic schedule...")
 
 	ticker := time.NewTicker(ag.config.ScanInterval)
 	defer ticker.Stop()
 
-	// Run initial scan immediately
-	if err := ag.runCycle(ctx); err != nil {
-		log.Printf("❌ Initial scan failed: %v", err)
-	}
-
-	// Run periodic scans
+	// Run scans based on ticker or manual trigger
 	for {
 		select {
 		case <-ctx.Done():
 			log.Println("🛑 ArchGuardian shutting down...")
 			return ctx.Err()
+		case <-ag.triggerScan: // Handle manual scan trigger
+			log.Println("⚡ Manual scan triggered via API.")
+			if err := ag.runCycle(ctx); err != nil {
+				log.Printf("❌ Manual scan cycle failed: %v", err)
+			}
+			// Reset the ticker to align with the manual scan time, preventing immediate double scan
+			ticker.Reset(ag.config.ScanInterval)
 		case <-ticker.C:
 			if err := ag.runCycle(ctx); err != nil {
 				log.Printf("❌ Scan cycle failed: %v", err)
@@ -1312,6 +2485,12 @@ func min(a, b float64) float64 {
 }
 
 // ============================================================================
+// GLOBAL VARIABLES
+// ============================================================================
+
+var guardianInstance *ArchGuardian // Global ArchGuardian instance for API access
+
+// ============================================================================
 // MAIN ENTRY POINT
 // ============================================================================
 
@@ -1320,6 +2499,13 @@ func main() {
 	log.Println("║            ArchGuardian - AI-Powered Code Guardian            ║")
 	log.Println("║          Deep Visibility • Risk Detection • Auto-Fix           ║")
 	log.Println("╚════════════════════════════════════════════════════════════════╝")
+
+	// Load .env file if it exists
+	if err := godotenv.Load(); err != nil {
+		log.Println("⚠️  No .env file found or failed to load, using environment variables only")
+	} else {
+		log.Println("✅ .env file loaded successfully")
+	}
 
 	// Load configuration from environment variables
 	config := &Config{
@@ -1356,6 +2542,12 @@ func main() {
 			},
 			CodeRemediationProvider: getEnv("CODE_REMEDIATION_PROVIDER", "anthropic"),
 		},
+		Orchestrator: OrchestratorConfig{
+			PlannerModel:   getEnv("ORCHESTRATOR_PLANNER_MODEL", "gemini-pro"),
+			ExecutorModels: strings.Split(getEnv("ORCHESTRATOR_EXECUTOR_MODELS", "llama3.1-8b,deepseek-coder"), ","),
+			FinalizerModel: getEnv("ORCHESTRATOR_FINALIZER_MODEL", "claude-3-sonnet-20240229"),
+			VerifierModel:  getEnv("ORCHESTRATOR_VERIFIER_MODEL", "gemini-pro"),
+		},
 		DataEngine: DataEngineConfig{
 			Enable:           getEnvBool("DATA_ENGINE_ENABLE", true),
 			EnableKafka:      getEnvBool("KAFKA_ENABLE", false),
@@ -1383,12 +2575,33 @@ func main() {
 		log.Println("⚠️  Warning: GEMINI_API_KEY not set")
 	}
 
+	// Create a single AIInferenceEngine instance to be shared
+	aiEngine := NewAIInferenceEngine(config)
+
 	// Create ArchGuardian instance
-	guardian := NewArchGuardian(config)
+	guardian := NewArchGuardian(config, aiEngine)
+	guardianInstance = guardian // Assign to global variable
+
+	// Initialize Log Analyzer for log stream processing
+	logAnalyzer := NewLogAnalyzer(config, aiEngine)
+
+	// Start dashboard server in a goroutine
+	go func() {
+		if err := startDashboardServer(guardianInstance); err != nil {
+			log.Printf("⚠️  Dashboard server failed: %v", err)
+		}
+	}()
+
+	// Start log ingestion server in a goroutine
+	go func() {
+		if err := startLogIngestionServer(logAnalyzer); err != nil {
+			log.Printf("⚠️  Log ingestion server failed: %v", err)
+		}
+	}()
 
 	// Run with context
 	ctx := context.Background()
-	if err := guardian.Run(ctx); err != nil {
+	if err := guardianInstance.Run(ctx); err != nil {
 		log.Fatalf("❌ ArchGuardian failed: %v", err)
 	}
 }
@@ -1417,4 +2630,805 @@ func getEnvInt(key string, defaultValue int) int {
 		}
 	}
 	return defaultValue
+}
+
+// ============================================================================
+// CODACY CLIENT
+// ============================================================================
+
+// CodacyClient handles interactions with the Codacy API
+type CodacyClient struct {
+	httpClient *http.Client
+	apiToken   string
+	baseURL    string
+	provider   string // "gh" for GitHub, "gl" for GitLab, etc.
+	repository string // owner/repo format
+}
+
+// CodacyIssue represents an issue from Codacy API
+type CodacyIssue struct {
+	ID          string                 `json:"id"`
+	Title       string                 `json:"title"`
+	Message     string                 `json:"message"`
+	Severity    string                 `json:"severity"`
+	Category    string                 `json:"category"`
+	FilePath    string                 `json:"file_path"`
+	Line        int                    `json:"line"`
+	Column      int                    `json:"column"`
+	PatternID   string                 `json:"pattern_id"`
+	PatternName string                 `json:"pattern_name"`
+	Status      string                 `json:"status"`
+	Metadata    map[string]interface{} `json:"metadata"`
+}
+
+// CodacyRepository represents a repository in Codacy
+type CodacyRepository struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Provider string `json:"provider"`
+	URL      string `json:"url"`
+}
+
+// CodacyRule represents a Codacy rule configuration
+type CodacyRule struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Enabled     bool   `json:"enabled"`
+	Severity    string `json:"severity"`
+}
+
+// NewCodacyClient creates a new Codacy client
+func NewCodacyClient(apiToken, provider, repository string) *CodacyClient {
+	return &CodacyClient{
+		httpClient: &http.Client{Timeout: 30 * time.Second},
+		apiToken:   apiToken,
+		baseURL:    "https://api.codacy.com/api/v3",
+		provider:   provider,
+		repository: repository,
+	}
+}
+
+// GetIssues fetches all open issues for the repository from Codacy
+func (cc *CodacyClient) GetIssues() ([]CodacyIssue, error) {
+	log.Printf("  🔍 Fetching Codacy issues for repository: %s", cc.repository)
+
+	url := fmt.Sprintf("%s/analysis/repositories/%s/%s/issues", cc.baseURL, cc.provider, cc.repository)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("api-token", cc.apiToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := cc.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch issues: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("codacy API returned status %d", resp.StatusCode)
+	}
+
+	var response struct {
+		Data []CodacyIssue `json:"data"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	log.Printf("  📊 Retrieved %d issues from Codacy", len(response.Data))
+	return response.Data, nil
+}
+
+// GetRepositories fetches all repositories for the account
+func (cc *CodacyClient) GetRepositories() ([]CodacyRepository, error) {
+	log.Println("  🔍 Fetching Codacy repositories...")
+
+	url := fmt.Sprintf("%s/repositories", cc.baseURL)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("api-token", cc.apiToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := cc.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch repositories: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("codacy API returned status %d", resp.StatusCode)
+	}
+
+	var response struct {
+		Data []CodacyRepository `json:"data"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	log.Printf("  📊 Retrieved %d repositories from Codacy", len(response.Data))
+	return response.Data, nil
+}
+
+// GetRules fetches all rules for the repository
+func (cc *CodacyClient) GetRules() ([]CodacyRule, error) {
+	log.Printf("  🔍 Fetching Codacy rules for repository: %s", cc.repository)
+
+	url := fmt.Sprintf("%s/analysis/repositories/%s/%s/rules", cc.baseURL, cc.provider, cc.repository)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("api-token", cc.apiToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := cc.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch rules: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("codacy API returned status %d", resp.StatusCode)
+	}
+
+	var response struct {
+		Data []CodacyRule `json:"data"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	log.Printf("  📊 Retrieved %d rules from Codacy", len(response.Data))
+	return response.Data, nil
+}
+
+// UpdateRule updates a specific rule configuration
+func (cc *CodacyClient) UpdateRule(ruleID string, enabled bool, severity string) error {
+	log.Printf("  🔧 Updating Codacy rule %s: enabled=%t, severity=%s", ruleID, enabled, severity)
+
+	url := fmt.Sprintf("%s/analysis/repositories/%s/%s/rules/%s", cc.baseURL, cc.provider, cc.repository, ruleID)
+
+	rule := CodacyRule{
+		ID:       ruleID,
+		Enabled:  enabled,
+		Severity: severity,
+	}
+
+	jsonData, err := json.Marshal(rule)
+	if err != nil {
+		return fmt.Errorf("failed to marshal rule data: %w", err)
+	}
+
+	req, err := http.NewRequest("PUT", url, strings.NewReader(string(jsonData)))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("api-token", cc.apiToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := cc.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to update rule: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("codacy API returned status %d", resp.StatusCode)
+	}
+
+	log.Printf("  ✅ Successfully updated Codacy rule %s", ruleID)
+	return nil
+}
+
+// ConvertCodacyIssueToTechnicalDebt converts a Codacy issue to a TechnicalDebtItem
+func (cc *CodacyClient) ConvertCodacyIssueToTechnicalDebt(issue CodacyIssue) types.TechnicalDebtItem {
+	// Map Codacy severity to our severity levels
+	severity := "medium"
+	switch issue.Severity {
+	case "Error", "Critical":
+		severity = "high"
+	case "Warning":
+		severity = "medium"
+	case "Info":
+		severity = "low"
+	}
+
+	// Map Codacy category to our type
+	debtType := "code_quality"
+	switch issue.Category {
+	case "CodeStyle", "BestPractice":
+		debtType = "code_style"
+	case "ErrorProne", "BugRisk":
+		debtType = "error_prone"
+	case "Performance":
+		debtType = "performance"
+	case "Security":
+		debtType = "security"
+	case "UnusedCode":
+		debtType = "unused_code"
+	case "Complexity":
+		debtType = "complexity"
+	case "Duplication":
+		debtType = "duplication"
+	}
+
+	// Estimate effort based on severity and category
+	effort := 2 // default
+	if issue.Severity == "Critical" || issue.Severity == "Error" {
+		effort = 4
+	} else if issue.Category == "Complexity" || issue.Category == "Duplication" {
+		effort = 3
+	}
+
+	location := issue.FilePath
+	if issue.Line > 0 {
+		location = fmt.Sprintf("%s:%d", issue.FilePath, issue.Line)
+	}
+
+	return types.TechnicalDebtItem{
+		ID:          fmt.Sprintf("CODACY-%s", issue.ID),
+		Location:    location,
+		Type:        debtType,
+		Severity:    severity,
+		Description: fmt.Sprintf("[%s] %s: %s", issue.PatternName, issue.Category, issue.Message),
+		Remediation: fmt.Sprintf("Fix the %s issue identified by Codacy rule: %s", issue.Category, issue.PatternName),
+		Effort:      effort,
+	}
+}
+
+// ============================================================================
+// LOG ANALYZER
+// ============================================================================
+
+// LogMsg represents a log message from external applications
+type LogMsg struct {
+	Timestamp time.Time              `json:"timestamp"`
+	Level     string                 `json:"level"`
+	Message   string                 `json:"message"`
+	Service   string                 `json:"service"`
+	Component string                 `json:"component"`
+	TraceID   string                 `json:"trace_id,omitempty"`
+	SpanID    string                 `json:"span_id,omitempty"`
+	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+	Error     *LogError              `json:"error,omitempty"`
+}
+
+// LogError represents error information in log messages
+type LogError struct {
+	Type  string `json:"type"`
+	Code  string `json:"code,omitempty"`
+	Stack string `json:"stack,omitempty"`
+	Cause string `json:"cause,omitempty"`
+}
+
+// LogAnalyzer processes log streams to identify issues and create remediation tasks
+type LogAnalyzer struct {
+	config         *Config
+	ai             *AIInferenceEngine
+	errorBuffer    map[string][]LogMsg // Buffer of recent errors per component
+	alertThreshold int
+}
+
+// NewLogAnalyzer creates a new log analyzer instance
+func NewLogAnalyzer(config *Config, ai *AIInferenceEngine) *LogAnalyzer {
+	return &LogAnalyzer{
+		config:         config,
+		ai:             ai,
+		errorBuffer:    make(map[string][]LogMsg),
+		alertThreshold: 5, // Alert after 5 errors from same component
+	}
+}
+
+// ProcessLog processes a single log message and identifies potential issues
+func (la *LogAnalyzer) ProcessLog(ctx context.Context, logMsg LogMsg) error {
+	// Add to error buffer for pattern analysis
+	componentKey := fmt.Sprintf("%s:%s", logMsg.Service, logMsg.Component)
+	if logMsg.Level == "ERROR" || logMsg.Level == "FATAL" || logMsg.Level == "CRITICAL" {
+		la.errorBuffer[componentKey] = append(la.errorBuffer[componentKey], logMsg)
+
+		// Keep only recent errors (last 50 per component)
+		if len(la.errorBuffer[componentKey]) > 50 {
+			la.errorBuffer[componentKey] = la.errorBuffer[componentKey][len(la.errorBuffer[componentKey])-50:]
+		}
+	}
+
+	// Check if we should analyze this component for issues
+	if len(la.errorBuffer[componentKey]) >= la.alertThreshold {
+		return la.analyzeErrorPattern(ctx, componentKey)
+	}
+
+	return nil
+}
+
+// analyzeErrorPattern uses AI to analyze error patterns and identify root causes
+func (la *LogAnalyzer) analyzeErrorPattern(ctx context.Context, componentKey string) error {
+	log.Printf("  🔍 Analyzing error pattern for component: %s", componentKey)
+
+	errors := la.errorBuffer[componentKey]
+
+	// Prepare error data for AI analysis
+	errorData := map[string]interface{}{
+		"component":   componentKey,
+		"error_count": len(errors),
+		"errors":      errors,
+		"time_range": map[string]interface{}{
+			"start": errors[0].Timestamp,
+			"end":   errors[len(errors)-1].Timestamp,
+		},
+	}
+
+	// Use AI to analyze the error pattern
+	provider := AIProviderGemini // Use Gemini for deep error analysis
+	analysis, err := la.ai.AnalyzeRisks(ctx, errorData, provider)
+	if err != nil {
+		log.Printf("  ⚠️  Failed to analyze error pattern: %v", err)
+		return nil
+	}
+
+	// Extract actionable issues from analysis
+	issues := la.extractIssuesFromAnalysis(analysis, componentKey)
+
+	// Create technical debt items for identified issues
+	for _, issue := range issues {
+		if err := la.createTechnicalDebtItem(issue); err != nil {
+			log.Printf("  ⚠️  Failed to create technical debt item: %v", err)
+		}
+	}
+
+	// Clear error buffer after analysis
+	delete(la.errorBuffer, componentKey)
+
+	log.Printf("  ✅ Error pattern analysis complete for %s: %d issues identified", componentKey, len(issues))
+	return nil
+}
+
+// extractIssuesFromAnalysis extracts actionable issues from AI analysis
+func (la *LogAnalyzer) extractIssuesFromAnalysis(analysis map[string]interface{}, componentKey string) []map[string]interface{} {
+	var issues []map[string]interface{}
+
+	// Extract issues from AI analysis
+	if issuesData, ok := analysis["log_issues"].([]interface{}); ok {
+		for _, issue := range issuesData {
+			if issueMap, ok := issue.(map[string]interface{}); ok {
+				issueMap["component"] = componentKey
+				issueMap["source"] = "log_analysis"
+				issues = append(issues, issueMap)
+			}
+		}
+	}
+
+	return issues
+}
+
+// createTechnicalDebtItem creates a technical debt item from log analysis findings
+func (la *LogAnalyzer) createTechnicalDebtItem(issue map[string]interface{}) error {
+	// In a real implementation, this would integrate with the RiskDiagnoser
+	// For now, we'll log the issue and could trigger remediation
+
+	log.Printf("  📋 Created technical debt item from log analysis:")
+	log.Printf("    Component: %v", issue["component"])
+	log.Printf("    Type: %v", issue["type"])
+	log.Printf("    Description: %v", issue["description"])
+	log.Printf("    Severity: %v", issue["severity"])
+
+	// Here we could trigger immediate remediation for critical log-identified issues
+	if severity, ok := issue["severity"].(string); ok && severity == "critical" {
+		log.Printf("  🚨 Critical issue detected in logs, triggering immediate remediation...")
+		// In a real implementation, this would trigger the remediation cycle
+	}
+
+	return nil
+}
+
+// ============================================================================
+// DASHBOARD SERVER
+// ============================================================================
+
+// startDashboardServer starts the web dashboard server with embedded files
+func startDashboardServer(ag *ArchGuardian) error {
+	log.Println("🌐 Starting ArchGuardian Dashboard Server...")
+
+	router := mux.NewRouter()
+	// Add CORS middleware to the router directly
+	router.Use(corsMiddleware)
+
+	// Serve embedded dashboard files
+	router.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		serveEmbeddedFile(w, r, "index.html", "text/html")
+	})
+
+	router.HandleFunc("/style.css", func(w http.ResponseWriter, r *http.Request) {
+		serveEmbeddedFile(w, r, "style.css", "text/css")
+	})
+
+	router.HandleFunc("/app.js", func(w http.ResponseWriter, r *http.Request) {
+		serveEmbeddedFile(w, r, "app.js", "application/javascript")
+	})
+
+	// API endpoints for dashboard data
+	router.HandleFunc("/api/v1/knowledge-graph", handleKnowledgeGraph).Methods("GET")
+	router.HandleFunc("/api/v1/risk-assessment", handleRiskAssessment).Methods("GET")
+	router.HandleFunc("/api/v1/issues", handleIssues).Methods("GET")
+	router.HandleFunc("/api/v1/coverage", handleCoverage).Methods("GET")
+	router.HandleFunc("/api/v1/scan/start", func(w http.ResponseWriter, r *http.Request) {
+		handleStartScan(w, r, ag)
+	}).Methods("POST")
+	router.HandleFunc("/api/v1/settings", handleSettings).Methods("GET", "POST")
+
+	// Health check endpoint
+	router.HandleFunc("/health", handleHealth).Methods("GET")
+
+	log.Println("✅ Dashboard server started on http://localhost:3000")
+	log.Println("📊 API endpoints available on http://localhost:3000/api/v1/")
+	log.Println("📁 Dashboard files served from embedded resources")
+	return http.ListenAndServe(":3000", router)
+}
+
+// corsMiddleware adds CORS headers to all responses
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// serveEmbeddedFile serves embedded dashboard files with proper content types
+func serveEmbeddedFile(w http.ResponseWriter, r *http.Request, filename, contentType string) {
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "no-cache")
+
+	var content string
+	switch filename {
+	case "index.html":
+		content = dashboardHTML
+	case "style.css":
+		content = dashboardCSS
+	case "app.js":
+		content = dashboardJS
+	default:
+		http.NotFound(w, r)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(content))
+}
+
+// handleKnowledgeGraph returns the current knowledge graph data
+func handleKnowledgeGraph(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// In a real implementation, this would get data from the current scan
+	// For now, return a sample response
+	response := map[string]interface{}{
+		"nodes": []map[string]interface{}{
+			{
+				"id":   "sample_node_1",
+				"type": "code",
+				"name": "main.go",
+				"path": "/path/to/main.go",
+			},
+		},
+		"edges": []map[string]interface{}{},
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+// startLogIngestionServer starts the log ingestion server for receiving external log streams
+func startLogIngestionServer(logAnalyzer *LogAnalyzer) error {
+	log.Println("📝 Starting Log Ingestion Server...")
+
+	router := mux.NewRouter()
+
+	// Log ingestion endpoints
+	router.HandleFunc("/api/v1/logs", func(w http.ResponseWriter, r *http.Request) {
+		handleLogIngestion(w, r, logAnalyzer)
+	}).Methods("POST")
+
+	router.HandleFunc("/api/v1/logs/batch", func(w http.ResponseWriter, r *http.Request) {
+		handleBatchLogIngestion(w, r, logAnalyzer)
+	}).Methods("POST")
+
+	// Health check for log ingestion
+	router.HandleFunc("/api/v1/logs/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":    "healthy",
+			"service":   "log_ingestion",
+			"timestamp": time.Now(),
+		})
+	}).Methods("GET")
+
+	log.Println("✅ Log ingestion server started on http://localhost:4000")
+	log.Println("📝 Log endpoints available on http://localhost:4000/api/v1/logs")
+	return http.ListenAndServe(":4000", router)
+}
+
+// handleLogIngestion processes a single log message
+func handleLogIngestion(w http.ResponseWriter, r *http.Request, logAnalyzer *LogAnalyzer) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	var logMsg LogMsg
+	if err := json.NewDecoder(r.Body).Decode(&logMsg); err != nil {
+		http.Error(w, "Invalid JSON format", http.StatusBadRequest)
+		return
+	}
+
+	// Set timestamp if not provided
+	if logMsg.Timestamp.IsZero() {
+		logMsg.Timestamp = time.Now()
+	}
+
+	// Process the log message
+	ctx := context.Background()
+	if err := logAnalyzer.ProcessLog(ctx, logMsg); err != nil {
+		log.Printf("  ⚠️  Failed to process log message: %v", err)
+		http.Error(w, "Failed to process log", http.StatusInternalServerError)
+		return
+	}
+
+	// Respond with success
+	response := map[string]interface{}{
+		"status":    "accepted",
+		"timestamp": time.Now(),
+		"message":   "Log message processed successfully",
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleBatchLogIngestion processes multiple log messages at once
+func handleBatchLogIngestion(w http.ResponseWriter, r *http.Request, logAnalyzer *LogAnalyzer) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	var logBatch struct {
+		Logs []LogMsg `json:"logs"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&logBatch); err != nil {
+		http.Error(w, "Invalid JSON format", http.StatusBadRequest)
+		return
+	}
+
+	ctx := context.Background()
+	processed := 0
+	errors := 0
+
+	// Process each log message
+	for _, logMsg := range logBatch.Logs {
+		// Set timestamp if not provided
+		if logMsg.Timestamp.IsZero() {
+			logMsg.Timestamp = time.Now()
+		}
+
+		if err := logAnalyzer.ProcessLog(ctx, logMsg); err != nil {
+			log.Printf("  ⚠️  Failed to process log message: %v", err)
+			errors++
+		} else {
+			processed++
+		}
+	}
+
+	// Respond with processing summary
+	response := map[string]interface{}{
+		"status":    "completed",
+		"timestamp": time.Now(),
+		"processed": processed,
+		"errors":    errors,
+		"total":     len(logBatch.Logs),
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleRiskAssessment returns the current risk assessment data
+func handleRiskAssessment(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// In a real implementation, this would get data from the current scan
+	// For now, return a sample response
+	response := map[string]interface{}{
+		"overall_score": 15.5,
+		"technical_debt": []map[string]interface{}{
+			{
+				"id":          "TD-1",
+				"location":    "main.go:100",
+				"type":        "complex_function",
+				"severity":    "medium",
+				"description": "Function is too complex",
+				"remediation": "Break down into smaller functions",
+				"effort":      4,
+			},
+		},
+		"security_vulns":         []map[string]interface{}{},
+		"obsolete_code":          []map[string]interface{}{},
+		"dangerous_dependencies": []map[string]interface{}{},
+		"timestamp":              time.Now(),
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleIssues returns filtered issues based on type
+func handleIssues(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	issueType := r.URL.Query().Get("type")
+	if issueType == "" {
+		issueType = "technical-debt"
+	}
+
+	// In a real implementation, this would get data from the current scan
+	// For now, return sample data based on type
+	var response map[string]interface{}
+
+	switch issueType {
+	case "technical-debt":
+		response = map[string]interface{}{
+			"technical_debt": []map[string]interface{}{
+				{
+					"id":          "TD-1",
+					"location":    "main.go:100",
+					"type":        "complex_function",
+					"severity":    "medium",
+					"description": "Function is too complex",
+					"remediation": "Break down into smaller functions",
+					"effort":      4,
+				},
+			},
+		}
+	case "security":
+		response = map[string]interface{}{
+			"security_vulns": []map[string]interface{}{
+				{
+					"cve":         "CVE-2023-1234",
+					"package":     "example-package",
+					"version":     "1.0.0",
+					"severity":    "high",
+					"description": "Buffer overflow vulnerability",
+					"fix_version": "1.0.1",
+					"cvss":        7.5,
+				},
+			},
+		}
+	case "obsolete":
+		response = map[string]interface{}{
+			"obsolete_code": []map[string]interface{}{
+				{
+					"path":             "old_file.go",
+					"references":       0,
+					"removal_safety":   "safe",
+					"recommend_action": "File is no longer used and can be removed",
+				},
+			},
+		}
+	case "dependencies":
+		response = map[string]interface{}{
+			"dangerous_dependencies": []map[string]interface{}{
+				{
+					"package":         "old-package",
+					"current_version": "1.0.0",
+					"latest_version":  "2.0.0",
+					"security_issues": 3,
+					"maintenance":     "deprecated",
+					"recommendation":  "Update to latest version",
+				},
+			},
+		}
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleCoverage returns test coverage data
+func handleCoverage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// In a real implementation, this would get data from test coverage analysis
+	// For now, return sample data
+	response := map[string]interface{}{
+		"overall_coverage": 78.5,
+		"lines_covered":    1250,
+		"total_lines":      1600,
+		"test_files":       15,
+		"file_coverage": map[string]float64{
+			"main.go":       85.0,
+			"scanner.go":    92.0,
+			"remediator.go": 78.0,
+		},
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleSettings handles GET and POST for settings
+func handleSettings(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	switch r.Method {
+	case "GET":
+		// Return current settings
+		response := map[string]interface{}{
+			"scan_interval":         24,
+			"remediation_threshold": 20,
+			"remediation_provider":  "anthropic",
+		}
+		json.NewEncoder(w).Encode(response)
+
+	case "POST":
+		// Update settings
+		var settings map[string]interface{}
+		json.NewDecoder(r.Body).Decode(&settings)
+
+		// In a real implementation, this would save settings
+		log.Printf("Settings updated: %+v", settings)
+
+		response := map[string]interface{}{
+			"success": true,
+			"message": "Settings updated successfully",
+		}
+		json.NewEncoder(w).Encode(response)
+	}
+}
+
+// handleStartScan triggers a new scan cycle
+func handleStartScan(w http.ResponseWriter, r *http.Request, ag *ArchGuardian) {
+	w.Header().Set("Content-Type", "application/json")
+	// CORS headers are now handled by the middleware
+
+	// Send a signal to the trigger channel
+	// Use a non-blocking send in case no one is listening (e.g., if a scan is already in progress)
+	select {
+	case ag.triggerScan <- true:
+		log.Println("API: Scan trigger signal sent.")
+		json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "message": "Scan triggered successfully."})
+	default:
+		log.Println("API: Scan trigger channel is busy or not ready.")
+		http.Error(w, "Scan trigger channel is busy or a scan is already in progress.", http.StatusServiceUnavailable)
+	}
+}
+
+// handleHealth returns health check status
+func handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	response := map[string]interface{}{
+		"status":    "healthy",
+		"timestamp": time.Now(),
+		"version":   "1.0.0",
+	}
+
+	json.NewEncoder(w).Encode(response)
 }

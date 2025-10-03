@@ -1,15 +1,15 @@
 // /home/gperry/Documents/GitHub/Inc-Line/Wordpress-Inference-Engine/inference/context_manager.go
 package inference_engine
 
-
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"regexp"
 	"strings"
 	"sync"
-	"time" // Import time package
+	// Import time package
 )
 
 // ChunkingStrategy defines how to split the text.
@@ -374,11 +374,12 @@ func (cm *ContextManager) processInParallel(_ context.Context, llm TextGenerator
 
 // processSequentially processes chunks in sequence, passing context between them.
 // Accepts the TextGenerator (LLM instance).
-func (cm *ContextManager) processSequentially(_ context.Context, llm TextGenerator, chunks []string, instructionPerChunk string) (string, error) {
+func (cm *ContextManager) processSequentially(ctx context.Context, llm TextGenerator, chunks []string, instructionPerChunk string) (string, error) {
 	// Instead of using pre-split chunks, we'll manage the text dynamically.
 	// Join the pre-split chunks back together for this approach.
 	// A better long-term solution might be to pass the raw text here.
-	remainingText := strings.Join(chunks, "\n\n") // Reconstruct (or pass original text)
+	originalPrompt := strings.Join(chunks, "\n\n") // Keep original prompt for final reassembly
+	remainingText := strings.Join(chunks, "\n\n")  // Reconstruct (or pass original text)
 
 	var results []string
 	var previousOutputSummary string // Store summary of previous output
@@ -469,77 +470,79 @@ func (cm *ContextManager) processSequentially(_ context.Context, llm TextGenerat
 		results = append(results, result)
 		log.Printf("ContextManager: Chunk %d processed.", chunkIndex)
 
-		// Generate summary *after* getting the result
-		previousOutputSummary = cm.summarizeForContext(result, cm.contextTokenBudget)
-		log.Printf("ContextManager: Generated summary for next chunk context: %s", previousOutputSummary)
-
-		// --- Conditional Delay ---
-		if adapter, ok := llm.(*LLMAdapter); ok { // Check if it's our adapter
-			// Access the underlying gollm LLM and its provider
-			if adapter.ProviderName != "" { // Check if provider name is available
-				log.Printf("ContextManager: Adding 10s delay after chunk %d (Provider: %s)...", chunkIndex, adapter.ProviderName)
-				time.Sleep(10 * time.Second) // Apply delay
-			}
+		// Generate a high-quality summary using an AI call
+		summary, err := cm.aiSummarizeForContext(ctx, llm, currentChunk, result)
+		if err != nil {
+			log.Printf("ContextManager: Warning - failed to generate AI summary for chunk %d: %v. Proceeding without summary.", chunkIndex, err)
+			previousOutputSummary = "" // Reset summary on failure
+		} else {
+			previousOutputSummary = summary
+			log.Printf("ContextManager: Generated AI summary for next chunk context: %s", previousOutputSummary)
 		}
-		// --- END Conditional Delay ---
 	} // End of loop through remainingText
-	return strings.Join(results, "\n\n---\n\n"), nil
+
+	// === FINAL STEP: Reassemble and clean the results ===
+	finalResult, err := cm.reassembleAndClean(ctx, llm, originalPrompt, results)
+	if err != nil {
+		log.Printf("ContextManager: Final reassembly failed: %v. Returning raw joined results.", err)
+		return strings.Join(results, "\n\n---\n\n"), nil // Return raw results as a fallback
+	}
+
+	return finalResult, nil
 }
 
-// Reassemble results in order
-
-// summarizeForContext creates a short summary of the text for context passing.
-// It aims to stay within the provided token budget.
-func (cm *ContextManager) summarizeForContext(text string, budget int) string {
-	if budget <= 0 {
-		return "" // No budget, no summary
-	}
-	text = strings.TrimSpace(text) // Trim input text first
-
-	// Split into sentences (or potentially words/tokens for finer control)
-	sentenceRegex := regexp.MustCompile(`[.!?]\s+`)
-	sentences := sentenceRegex.Split(text, -1)
-	numSentences := len(sentences)
-
-	var summarySentences []string // Store sentences in reverse order
-	currentTokens := 0
-
-	// Iterate backwards through sentences
-	for i := numSentences - 1; i >= 0; i-- {
-		sentence := strings.TrimSpace(sentences[i])
-		if sentence == "" {
-			continue
-		}
-		// Add back punctuation for context
-		originalIndex := strings.LastIndex(text, sentence) // Find last occurrence in original text
-		if originalIndex != -1 && originalIndex+len(sentence) < len(text) {
-			punctuation := text[originalIndex+len(sentence)]
-			if punctuation == '.' || punctuation == '!' || punctuation == '?' {
-				sentence += string(punctuation)
-			}
-		}
-		// Estimate tokens for the sentence (add 1 for potential space)
-		sentenceTokens := estimateTokens(sentence, cm.modelName) + 1
-
-		if currentTokens+sentenceTokens <= budget {
-			summarySentences = append(summarySentences, sentence) // Add sentence
-			currentTokens += sentenceTokens                       // Accumulate tokens *only* if sentence is added
-		} else {
-			// Stop adding sentences once budget is exceeded
-			break
-		}
-	} // End of loop iterating backwards through sentences
-
-	// Reverse the collected sentences to restore chronological order
-	for i, j := 0, len(summarySentences)-1; i < j; i, j = i+1, j-1 {
-		summarySentences[i], summarySentences[j] = summarySentences[j], summarySentences[i]
+// aiSummarizeForContext uses an LLM to create a high-quality summary of the last processed chunk and its result.
+func (cm *ContextManager) aiSummarizeForContext(_ context.Context, llm TextGenerator, previousChunk, previousResult string) (string, error) {
+	if previousResult == "" {
+		return "", nil
 	}
 
-	// Join the sentences (now in correct order)
-	if len(summarySentences) == 0 {
-		return ""
+	summaryPrompt := fmt.Sprintf(`
+You are a summarization AI. Your task is to create a concise summary that bridges the gap between a processed text chunk and the next one.
+Focus on the key information and context from the "PREVIOUS CHUNK" and its "GENERATED RESULT" that will be essential for understanding and continuing the task on the next chunk of text.
+
+PREVIOUS CHUNK:
+---
+%s
+---
+
+GENERATED RESULT:
+---
+%s
+---
+
+CONCISE SUMMARY FOR NEXT CHUNK:
+`, previousChunk, previousResult)
+
+	return llm.GenerateText(summaryPrompt)
+}
+
+// reassembleAndClean takes the individual chunk results and uses an LLM to create a final, clean, coherent document.
+func (cm *ContextManager) reassembleAndClean(_ context.Context, llm TextGenerator, originalPrompt string, chunkResults []string) (string, error) {
+	log.Println("ContextManager: Starting final reassembly and cleanup step...")
+
+	if len(chunkResults) == 0 {
+		return "", errors.New("no chunk results to reassemble")
 	}
-	return strings.Join(summarySentences, " ")
+
+	joinedResults := strings.Join(chunkResults, "\n\n--- (New Chunk Result) ---\n\n")
+
+	reassemblyPrompt := fmt.Sprintf(`
+You are a document reassembly AI. Your task is to combine the following processed text chunks into a single, coherent, and clean final document.
+The final document must fully address the "ORIGINAL PROMPT".
+
+CRITICAL INSTRUCTIONS:
+1.  Merge the chunk results seamlessly.
+2.  Remove any repetitive headers, footers, or instructions that the AI may have included for itself (e.g., "Context from previous section:", "Current Section:", "---").
+3.  Ensure the final output is a clean, complete, and well-formatted response. Do not include any of your own commentary.
+
+ORIGINAL PROMPT: "%s"
+
+PROCESSED CHUNKS TO REASSEMBLE:
+%s
+`, originalPrompt, joinedResults)
+
+	return llm.GenerateText(reassemblyPrompt)
 }
 
 // findSplitIndex finds a suitable index to split the text within the token budget.

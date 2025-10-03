@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ArchGuardian Dashboard</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://unpkg.com/vis-network@9.1.2/dist/vis-network.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="dashboard">
+        <!-- Navigation -->
+        <nav class="navbar">
+            <div class="nav-brand">
+                <h1>🛡️ ArchGuardian</h1>
+            </div>
+            <div class="nav-links">
+                <button class="nav-btn active" data-view="overview">Overview</button>
+                <button class="nav-btn" data-view="graph">Knowledge Graph</button>
+                <button class="nav-btn" data-view="projects">Projects</button>
+                <button class="nav-btn" data-view="issues">Issues</button>
+                <button class="nav-btn" data-view="coverage">Coverage</button>
+                <button class="nav-btn" data-view="integrations">Integrations</button>
+                <button class="nav-btn" data-view="settings">Settings</button>
+            </div>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Overview View -->
+            <div id="overview-view" class="view active">
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <h3>Risk Score</h3>
+                        <div class="risk-score" id="overall-risk">Loading...</div>
+                        <div class="risk-trend">↓ 2.3% from last scan</div>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Code Quality</h3>
+                        <div class="quality-score" id="quality-score">Loading...</div>
+                        <div class="quality-trend">↑ 5.1% improvement</div>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Dependencies</h3>
+                        <div class="dep-count" id="dep-count">Loading...</div>
+                        <div class="dep-status">12 need updates</div>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Runtime Health</h3>
+                        <div class="runtime-status" id="runtime-status">Loading...</div>
+                        <div class="runtime-details">All systems operational</div>
+                    </div>
+                </div>
+
+                <div class="charts-section">
+                    <div class="chart-container">
+                        <canvas id="risk-chart"></canvas>
+                    </div>
+                    <div class="chart-container">
+                        <canvas id="coverage-chart"></canvas>
+                    </div>
+                </div>
+
+                <div class="recent-activity">
+                    <h3>Recent Activity</h3>
+                    <div class="activity-list" id="activity-list">
+                        <div class="activity-item">
+                            <span class="activity-time">2 minutes ago</span>
+                            <span class="activity-desc">✅ Scan cycle completed</span>
+                        </div>
+                        <div class="activity-item">
+                            <span class="activity-time">15 minutes ago</span>
+                            <span class="activity-desc">🔧 Fixed 3 security vulnerabilities</span>
+                        </div>
+                        <div class="activity-item">
+                            <span class="activity-time">1 hour ago</span>
+                            <span class="activity-desc">📦 Updated 5 dependencies</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Knowledge Graph View -->
+            <div id="graph-view" class="view">
+                <div class="graph-controls">
+                    <button class="control-btn" onclick="filterNodes('all')">All</button>
+                    <button class="control-btn" onclick="filterNodes('code')">Code</button>
+                    <button class="control-btn" onclick="filterNodes('library')">Libraries</button>
+                    <button class="control-btn" onclick="filterNodes('process')">Runtime</button>
+                    <button class="control-btn" onclick="refreshGraph()">Refresh</button>
+                </div>
+                <div id="knowledge-graph" class="graph-container"></div>
+            </div>
+
+            <!-- Projects View -->
+            <div id="projects-view" class="view">
+                <div class="projects-header">
+                    <h2>Managed Projects</h2>
+                    <button class="refresh-btn" onclick="window.dashboard.loadProjects()">Refresh</button>
+                </div>
+                <div class="projects-grid">
+                    <div id="projects-list" class="projects-list">
+                        <!-- Project cards will be injected here by app.js -->
+                    </div>
+                    <div class="add-project-card">
+                        <h3>Connect New Project</h3>
+                        <div class="setting-item">
+                            <label for="project-type">Connection Type:</label>
+                            <select id="project-type">
+                                <option value="local">Local Folder</option>
+                                <option value="github">GitHub Repository</option>
+                            </select>
+                        </div>
+                        <input type="text" id="project-path" placeholder="Enter local path or GitHub URL">
+                        <button class="save-btn" onclick="window.dashboard.addProject()">Connect Project</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Issues View -->
+            <div id="issues-view" class="view">
+                <div class="issues-header">
+                    <h2>System Issues</h2>
+                    <button class="refresh-btn" onclick="refreshIssues()">Refresh</button>
+                </div>
+                <div class="issues-content">
+                    <div class="issues-tabs">
+                        <button class="tab-btn active" data-tab="technical-debt">Technical Debt</button>
+                        <button class="tab-btn" data-tab="security">Security</button>
+                        <button class="tab-btn" data-tab="obsolete">Obsolete Code</button>
+                        <button class="tab-btn" data-tab="dependencies">Dependencies</button>
+                    </div>
+                    <div id="issues-container" class="issues-container">
+                        <div class="loading">Loading issues...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Coverage View -->
+            <div id="coverage-view" class="view">
+                <div class="coverage-header">
+                    <h2>Test Coverage</h2>
+                    <button class="refresh-btn" onclick="refreshCoverage()">Refresh</button>
+                </div>
+                <div class="coverage-stats">
+                    <div class="coverage-card">
+                        <h3>Overall Coverage</h3>
+                        <div class="coverage-percent" id="overall-coverage">Loading...</div>
+                    </div>
+                    <div class="coverage-card">
+                        <h3>Lines Covered</h3>
+                        <div class="coverage-lines" id="lines-covered">Loading...</div>
+                    </div>
+                    <div class="coverage-card">
+                        <h3>Test Files</h3>
+                        <div class="test-files" id="test-files">Loading...</div>
+                    </div>
+                </div>
+                <div class="coverage-chart-container">
+                    <canvas id="coverage-details-chart"></canvas>
+                </div>
+            </div>
+
+            <!-- Integrations View -->
+            <div id="integrations-view" class="view">
+                <div class="integrations-header">
+                    <h2>Third-Party Integrations</h2>
+                </div>
+                <div class="integrations-grid">
+                    <div class="integration-card">
+                        <h3>🤖 AI Providers</h3>
+                        <div class="integration-status" id="ai-providers-status">
+                            <div class="status-item">Cerebras: ✅ Connected</div>
+                            <div class="status-item">Gemini: ✅ Connected</div>
+                            <div class="status-item">Anthropic: ✅ Connected</div>
+                        </div>
+                    </div>
+                    <div class="integration-card">
+                        <h3>📊 Data Engine</h3>
+                        <div class="integration-status" id="data-engine-status">
+                            <div class="status-item">ChromaDB: ✅ Connected</div>
+                            <div class="status-item">WebSocket: ✅ Running</div>
+                            <div class="status-item">REST API: ✅ Running</div>
+                        </div>
+                    </div>
+                    <div class="integration-card">
+                        <h3>🔗 External Services</h3>
+                        <div class="integration-status" id="external-services-status">
+                            <div class="status-item">Codacy: ⚠️ Not Configured</div>
+                            <div class="status-item">GitHub: ✅ Connected</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Settings View -->
+            <div id="settings-view" class="view">
+                <div class="settings-header">
+                    <h2>Configuration</h2>
+                </div>
+                <div class="settings-content">
+                    <div class="settings-section">
+                        <h3>Scan Settings</h3>
+                        <div class="setting-item">
+                            <label>Scan Interval (hours):</label>
+                            <input type="number" id="scan-interval" value="24">
+                        </div>
+                        <div class="setting-item">
+                            <label>Auto-remediation threshold:</label>
+                            <input type="number" id="remediation-threshold" value="20">
+                        </div>
+                    </div>
+                    <div class="settings-section">
+                        <h3>AI Providers</h3>
+                        <div class="setting-item">
+                            <label>Code Remediation Provider:</label>
+                            <select id="remediation-provider">
+                                <option value="anthropic">Anthropic (Claude)</option>
+                                <option value="openai">OpenAI (GPT-4)</option>
+                                <option value="deepseek">DeepSeek</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="settings-actions">
+                        <button class="save-btn" onclick="saveSettings()">Save Settings</button>
+                        <button class="reset-btn" onclick="resetSettings()">Reset to Defaults</button>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

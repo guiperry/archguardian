@@ -1,7 +1,7 @@
 package data_engine
 
 import (
-	"archgardian/types"
+	"archguardian/types"
 	"context"
 	"encoding/json"
 	"fmt"
