@@ -28,6 +28,9 @@ type DataEngine struct {
 	// Channels for communication with UI
 	alertChan   chan Alert
 	metricsChan chan *MetricsSnapshot
+
+	// Callback for when WebSocket client is ready
+	onClientReadyCallback func()
 }
 
 // DataEngineConfig contains configuration for the data engine
@@ -268,10 +271,49 @@ func (d *DataEngine) ProcessEvent(event Event) error {
 	return nil
 }
 
+// BroadcastLog sends a raw log message to all WebSocket clients.
+func (d *DataEngine) BroadcastLog(message string) {
+	if d.config.EnableWebSocket && d.websocket != nil && d.websocket.IsRunning() {
+		d.websocket.BroadcastLog(message)
+	}
+}
+
+// BroadcastSecurityVulnerability broadcasts a security vulnerability found event
+func (d *DataEngine) BroadcastSecurityVulnerability(vuln interface{}) {
+	if d.config.EnableWebSocket && d.websocket != nil && d.websocket.IsRunning() {
+		d.websocket.BroadcastSecurityVulnerability(vuln)
+	}
+}
+
+// BroadcastRemediationCompleted broadcasts a remediation completed event
+func (d *DataEngine) BroadcastRemediationCompleted(result interface{}) {
+	if d.config.EnableWebSocket && d.websocket != nil && d.websocket.IsRunning() {
+		d.websocket.BroadcastRemediationCompleted(result)
+	}
+}
+
 // ProcessLogMsg processes a log message
 func (d *DataEngine) ProcessLogMsg(msg messages.LogMsg) error {
 	event := ConvertLogMsg(msg)
 	return d.ProcessEvent(event)
+}
+
+// SetOnClientReadyCallback sets the callback function to be called when a WebSocket client is ready
+func (d *DataEngine) SetOnClientReadyCallback(callback func()) {
+	d.mutex.Lock()
+	defer d.mutex.Unlock()
+	d.onClientReadyCallback = callback
+}
+
+// TriggerClientReady triggers the client ready callback
+func (d *DataEngine) TriggerClientReady() {
+	d.mutex.RLock()
+	callback := d.onClientReadyCallback
+	d.mutex.RUnlock()
+
+	if callback != nil {
+		callback()
+	}
 }
 
 // handleAlert handles an alert
@@ -454,4 +496,9 @@ func (d *DataEngine) IsRESTAPIRunning() bool {
 	}
 
 	return d.restAPI.IsRunning()
+}
+
+// GetWebSocketServer returns the WebSocket server instance
+func (d *DataEngine) GetWebSocketServer() *WebSocketServer {
+	return d.websocket
 }

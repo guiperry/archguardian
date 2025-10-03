@@ -2,29 +2,35 @@
 
 class ArchGuardianDashboard {
     constructor() {
-        this.currentView = 'overview';
+        this.currentView = 'console';
         this.network = null;
         this.riskChart = null;
         this.coverageChart = null;
         this.coverageDetailsChart = null;
+        this.githubAuthenticated = false;
+        this.currentTheme = 'light'; // Default theme
 
         this.init();
     }
 
     init() {
+        this.loadThemePreference();
         this.setupNavigation();
         this.setupWebSocket();
         this.loadInitialData();
         this.setupCharts();
         this.loadProjects(); // Load projects on initial load
-        this.setupGraph();
+        this.setupConnectionTabs();
+        this.setupThemeToggle();
+        // Print an initialization message to the dashboard console
+        try { this.appendConsoleLog('Dashboard initialized'); } catch (e) { /* silent */ }
     }
 
     setupNavigation() {
         const navBtns = document.querySelectorAll('.nav-btn');
         navBtns.forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                const view = e.target.dataset.view;
+            btn.addEventListener('click', () => {
+                const view = btn.dataset.view;
                 this.switchView(view);
             });
         });
@@ -32,8 +38,8 @@ class ArchGuardianDashboard {
         // Setup issues tabs
         const tabBtns = document.querySelectorAll('.tab-btn');
         tabBtns.forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                const tab = e.target.dataset.tab;
+            btn.addEventListener('click', () => {
+                const tab = btn.dataset.tab;
                 this.switchTab(tab);
             });
         });
@@ -74,10 +80,19 @@ class ArchGuardianDashboard {
 
     setupWebSocket() {
         // Connect to ArchGuardian's WebSocket server
-        this.ws = new WebSocket(`ws://localhost:8080/ws`);
+        this.ws = new WebSocket(`ws://localhost:3000/ws`);
 
         this.ws.onopen = () => {
             console.log('Connected to ArchGuardian WebSocket');
+            // Notify the backend that the client is ready to receive initial logs
+            this.appendConsoleLog('WebSocket connected');
+            try {
+                this.ws.send(JSON.stringify({ type: 'client_ready' }));
+                this.appendConsoleLog('Sent client_ready to server');
+            } catch (e) {
+                console.error('Failed to send client_ready:', e);
+                this.appendConsoleLog('Failed to send client_ready');
+            }
         };
 
         this.ws.onmessage = (event) => {
@@ -87,6 +102,12 @@ class ArchGuardianDashboard {
 
         this.ws.onerror = (error) => {
             console.error('WebSocket error:', error);
+            this.appendConsoleLog('WebSocket error: ' + (error && error.message ? error.message : JSON.stringify(error)));
+        };
+
+        this.ws.onclose = (ev) => {
+            console.warn('WebSocket closed', ev);
+            this.appendConsoleLog('WebSocket closed');
         };
     }
 
@@ -100,6 +121,11 @@ class ArchGuardianDashboard {
                 break;
             case 'remediation_completed':
                 this.showNotification('Remediation completed successfully!', 'success');
+                break;
+            case 'log':
+                // Log message is nested in data.data.message
+                const logMessage = data.data?.message || data.message || '';
+                this.appendConsoleLog(logMessage);
                 break;
         }
     }
@@ -189,7 +215,7 @@ class ArchGuardianDashboard {
 
     async loadKnowledgeGraph() {
         try {
-            const response = await fetch('http://localhost:7080/api/v1/knowledge-graph');
+            const response = await fetch('http://localhost:3000/api/v1/knowledge-graph');
             const data = await response.json();
 
             if (data.nodes && data.edges) {
@@ -202,7 +228,7 @@ class ArchGuardianDashboard {
 
     async loadRiskAssessment() {
         try {
-            const response = await fetch('http://localhost:7080/api/v1/risk-assessment');
+            const response = await fetch('http://localhost:3000/api/v1/risk-assessment');
             const data = await response.json();
 
             this.updateOverviewData(data);
@@ -213,7 +239,7 @@ class ArchGuardianDashboard {
 
     async loadCoverageData() {
         try {
-            const response = await fetch('http://localhost:7080/api/v1/coverage');
+            const response = await fetch('http://localhost:3000/api/v1/coverage');
             const data = await response.json();
 
             this.updateCoverageData(data);
@@ -385,7 +411,8 @@ class ArchGuardianDashboard {
                 id: node.id,
                 label: node.name,
                 color: color,
-                shape: node.type === 'process' ? 'square' : 'circle'
+                shape: node.type === 'process' ? 'square' : 'circle',
+                type: node.type // keep original type for filtering
             });
         });
 
@@ -404,6 +431,9 @@ class ArchGuardianDashboard {
             nodes: nodes,
             edges: edges
         };
+
+        // keep a reference to the original graph data so filtering can restore it
+        this.currentGraphData = graphData;
 
         const options = {
             nodes: {
@@ -464,13 +494,27 @@ class ArchGuardianDashboard {
         this.network.setData(graphData);
     }
 
+    appendConsoleLog(message) {
+        const consoleOutput = document.getElementById('console-output');
+        if (consoleOutput) {
+            consoleOutput.textContent += message + '\n';
+            // Auto-scroll to the bottom
+            consoleOutput.scrollTop = consoleOutput.scrollHeight;
+        }
+    }
+
+    clearConsole() {
+        const consoleOutput = document.getElementById('console-output');
+        if (consoleOutput) consoleOutput.textContent = '';
+    }
+
     refreshGraph() {
         this.loadKnowledgeGraph();
     }
 
     async loadIssuesData(type) {
         try {
-            const response = await fetch(`http://localhost:7080/api/v1/issues?type=${type}`);
+            const response = await fetch(`http://localhost:3000/api/v1/issues?type=${type}`);
             const data = await response.json();
 
             this.renderIssues(data, type);
@@ -612,6 +656,7 @@ class ArchGuardianDashboard {
             case 'graph':
                 this.loadKnowledgeGraph();
                 break;
+            // No specific data to load for 'console' view as it's real-time
         }
     }
 
@@ -630,7 +675,7 @@ class ArchGuardianDashboard {
         const remediationProvider = document.getElementById('remediation-provider').value;
 
         // Send settings to server
-        fetch('http://localhost:7080/api/v1/settings', {
+        fetch('http://localhost:3000/api/v1/settings', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -655,6 +700,330 @@ class ArchGuardianDashboard {
         document.getElementById('scan-interval').value = '24';
         document.getElementById('remediation-threshold').value = '20';
         document.getElementById('remediation-provider').value = 'anthropic';
+    }
+
+    setupConnectionTabs() {
+        const connectionTabs = document.querySelectorAll('.connection-tab');
+        connectionTabs.forEach(tab => {
+            tab.addEventListener('click', () => {
+                const tabName = tab.dataset.tab;
+                this.switchConnectionTab(tabName);
+            });
+        });
+
+        // Monitor GitHub input fields to enable/disable connect button
+        const githubInputs = ['github-owner', 'github-repo'];
+        githubInputs.forEach(inputId => {
+            document.getElementById(inputId).addEventListener('input', () => {
+                this.updateGitHubConnectButton();
+            });
+        });
+    }
+
+    switchConnectionTab(tab) {
+        // Remove active class from all tabs and panels
+        document.querySelectorAll('.connection-tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.connection-panel').forEach(p => p.classList.remove('active'));
+
+        // Add active class to selected tab and panel
+        document.querySelector(`[data-tab="${tab}"]`).classList.add('active');
+        document.getElementById(`${tab}-connection`).classList.add('active');
+    }
+
+    async selectFolder() {
+        try {
+            // Use the native file system access API if available
+            if (window.showDirectoryPicker) {
+                const directoryHandle = await window.showDirectoryPicker();
+                const path = await this.getDirectoryPath(directoryHandle);
+                document.getElementById('local-folder-path').value = path;
+
+                // Auto-detect project name from folder name
+                const projectName = directoryHandle.name;
+                document.getElementById('project-name').value = projectName;
+
+                this.showNotification(`Selected folder: ${projectName}`, 'success');
+            } else {
+                // Fallback for browsers that don't support the File System Access API
+                // We'll create a hidden file input that allows directory selection where supported
+                const input = document.createElement('input');
+                input.type = 'file';
+                // webkitdirectory allows selecting directories in Chromium-based browsers
+                input.webkitdirectory = true;
+                input.directory = true;
+                input.multiple = false;
+                input.style.display = 'none';
+                document.body.appendChild(input);
+
+                input.addEventListener('change', (ev) => {
+                    const files = ev.target.files;
+                    if (files && files.length > 0) {
+                        // derive a folder name from the first file's path
+                        const firstPath = files[0].webkitRelativePath || files[0].name;
+                        const folderName = firstPath.split('/')[0];
+                        document.getElementById('local-folder-path').value = folderName;
+                        document.getElementById('project-name').value = folderName;
+                        this.showNotification(`Selected folder: ${folderName}`, 'success');
+                    } else {
+                        this.showNotification('No folder selected', 'warning');
+                    }
+                    document.body.removeChild(input);
+                });
+
+                input.click();
+            }
+        } catch (error) {
+            if (error.name !== 'AbortError') {
+                console.error('Error selecting folder:', error);
+                this.showNotification('Failed to select folder. Please try again.', 'error');
+            }
+        }
+    }
+
+    async getDirectoryPath(directoryHandle) {
+        // For security reasons, we can't get the full system path
+        // Instead, we'll use the folder name as identifier
+        return directoryHandle.name;
+    }
+
+    async connectLocalProject() {
+        const folderPath = document.getElementById('local-folder-path').value;
+        const projectName = document.getElementById('project-name').value || folderPath;
+        const scanDepth = document.getElementById('scan-depth').value;
+
+        if (!folderPath) {
+            this.showNotification('Please select a project folder first.', 'error');
+            return;
+        }
+
+        try {
+            const response = await fetch('http://localhost:3000/api/v1/projects', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    type: 'local',
+                    path: folderPath,
+                    name: projectName,
+                    scanDepth: scanDepth
+                })
+            });
+
+            if (!response.ok) {
+                const errData = await response.json();
+                throw new Error(errData.message || 'Failed to connect local project');
+            }
+
+            this.showNotification('Local project connected successfully!', 'success');
+
+            // Clear form
+            document.getElementById('local-folder-path').value = '';
+            document.getElementById('project-name').value = '';
+
+            // Refresh projects list
+            this.loadProjects();
+        } catch (error) {
+            console.error('Failed to connect local project:', error);
+            this.showNotification(error.message, 'error');
+        }
+    }
+
+    async authenticateGitHub() {
+        try {
+            // Open GitHub OAuth popup or redirect
+            const authWindow = window.open(
+                'http://localhost:3000/auth/github',
+                'GitHub Authentication',
+                'width=600,height=700,scrollbars=yes,resizable=yes'
+            );
+
+            // Listen for authentication completion
+            const checkAuth = setInterval(() => {
+                if (authWindow.closed) {
+                    clearInterval(checkAuth);
+                    this.checkGitHubAuthStatus();
+                }
+            }, 1000);
+
+        } catch (error) {
+            console.error('GitHub authentication error:', error);
+            this.showNotification('Failed to start GitHub authentication', 'error');
+        }
+    }
+
+    async checkGitHubAuthStatus() {
+        try {
+            const response = await fetch('http://localhost:3000/api/v1/auth/github/status');
+            const authData = await response.json();
+
+            if (authData.authenticated) {
+                this.githubAuthenticated = true;
+                this.updateGitHubAuthUI(true);
+                this.showNotification('GitHub authentication successful!', 'success');
+            } else {
+                this.updateGitHubAuthUI(false);
+            }
+        } catch (error) {
+            console.error('Failed to check GitHub auth status:', error);
+            this.updateGitHubAuthUI(false);
+        }
+    }
+
+    updateGitHubAuthUI(authenticated) {
+        const authStatus = document.getElementById('github-auth-status');
+        const authBtn = document.querySelector('.auth-btn');
+        const connectBtn = document.querySelector('.github-connect-btn');
+
+        if (authenticated) {
+            authStatus.innerHTML = `
+                <span class="auth-indicator connected"></span>
+                <span>Authenticated</span>
+            `;
+            authBtn.textContent = 'Re-authenticate';
+            connectBtn.disabled = false;
+        } else {
+            authStatus.innerHTML = `
+                <span class="auth-indicator"></span>
+                <span>Not authenticated</span>
+            `;
+            authBtn.textContent = 'Authenticate with GitHub';
+            connectBtn.disabled = true;
+        }
+    }
+
+    updateGitHubConnectButton() {
+        const owner = document.getElementById('github-owner').value;
+        const repo = document.getElementById('github-repo').value;
+        const connectBtn = document.querySelector('.github-connect-btn');
+
+        connectBtn.disabled = !(owner && repo && this.githubAuthenticated);
+    }
+
+    async connectGitHubProject() {
+        const owner = document.getElementById('github-owner').value;
+        const repo = document.getElementById('github-repo').value;
+        const branch = document.getElementById('github-branch').value;
+        const includePRs = document.getElementById('github-include-prs').checked;
+        const includeIssues = document.getElementById('github-include-issues').checked;
+        const watchReleases = document.getElementById('github-watch-releases').checked;
+
+        if (!owner || !repo) {
+            this.showNotification('Please enter both owner and repository name.', 'error');
+            return;
+        }
+
+        try {
+            const response = await fetch('http://localhost:3000/api/v1/projects', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    type: 'github',
+                    owner: owner,
+                    repo: repo,
+                    branch: branch,
+                    includePRs: includePRs,
+                    includeIssues: includeIssues,
+                    watchReleases: watchReleases
+                })
+            });
+
+            if (!response.ok) {
+                const errData = await response.json();
+                throw new Error(errData.message || 'Failed to connect GitHub repository');
+            }
+
+            this.showNotification('GitHub repository connected successfully!', 'success');
+
+            // Clear form
+            document.getElementById('github-owner').value = '';
+            document.getElementById('github-repo').value = '';
+            document.getElementById('github-branch').value = 'main';
+
+            // Refresh projects list
+            this.loadProjects();
+        } catch (error) {
+            console.error('Failed to connect GitHub project:', error);
+            this.showNotification(error.message, 'error');
+        }
+    }
+
+    // Theme Management
+    loadThemePreference() {
+        const savedTheme = localStorage.getItem('archguardian-theme');
+        if (savedTheme) {
+            this.currentTheme = savedTheme;
+            this.applyTheme(savedTheme);
+        } else {
+            // Check system preference
+            if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+                this.currentTheme = 'dark';
+                this.applyTheme('dark');
+            }
+        }
+    }
+
+    setupThemeToggle() {
+        const themeToggle = document.getElementById('theme-toggle');
+        if (themeToggle) {
+            themeToggle.addEventListener('click', () => {
+                this.toggleTheme();
+            });
+        }
+    }
+
+    toggleTheme() {
+        this.currentTheme = this.currentTheme === 'light' ? 'dark' : 'light';
+        this.saveThemePreference();
+        this.applyTheme(this.currentTheme);
+    }
+
+    applyTheme(theme) {
+        document.documentElement.setAttribute('data-theme', theme);
+        
+        // Update theme icon
+        const themeIcon = document.querySelector('.theme-icon');
+        if (themeIcon) {
+            themeIcon.textContent = theme === 'light' ? '🌙' : '☀️';
+        }
+
+        // Update charts if they exist
+        // A small delay ensures the CSS variables are updated before the chart re-renders
+        setTimeout(() => this.updateChartThemes(), 50);
+    }
+
+    updateChartThemes() {
+        const bodyStyles = getComputedStyle(document.body);
+        const primaryColor = bodyStyles.getPropertyValue('--primary-color').trim();
+        const errorColor = bodyStyles.getPropertyValue('--error-color').trim();
+        const successColor = bodyStyles.getPropertyValue('--success-color').trim();
+        const cardBgColor = bodyStyles.getPropertyValue('--card-background').trim();
+
+        // Update chart colors based on theme
+        if (this.riskChart) {
+            this.riskChart.data.datasets[0].borderColor = errorColor;
+            this.riskChart.data.datasets[0].backgroundColor = `${errorColor}1A`; // Add alpha
+            this.riskChart.update();
+        }
+
+        if (this.coverageChart) {
+            const colors = this.currentTheme === 'dark'
+                ? ['hsl(142, 76%, 36%)', 'hsl(217, 33%, 17%)']
+                : ['rgb(16, 185, 129)', 'rgb(229, 231, 235)'];
+            this.coverageChart.data.datasets[0].backgroundColor = [successColor, cardBgColor];
+            this.coverageChart.update();
+        }
+
+        if (this.coverageDetailsChart) {
+            const backgroundColor = this.currentTheme === 'dark'
+                ? 'hsla(271, 91%, 65%, 0.8)'
+                : 'rgba(37, 99, 235, 0.8)'; // Keep this as is or use primaryColor
+            this.coverageDetailsChart.data.datasets[0].backgroundColor = primaryColor;
+            this.coverageDetailsChart.data.datasets[0].backgroundColor = backgroundColor;
+            this.coverageDetailsChart.update();
+        }
+    }
+
+    saveThemePreference() {
+        localStorage.setItem('archguardian-theme', this.currentTheme);
     }
 
     showNotification(message, type = 'info') {
@@ -709,56 +1078,45 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // Add CSS animations for notifications
+
 const style = document.createElement('style');
 style.textContent = `
     @keyframes slideIn {
-        from {
-            transform: translateX(100%);
-            opacity: 0;
-        }
-        to {
-            transform: translateX(0);
-            opacity: 1;
-        }
+        from { transform: translateX(100%); opacity: 0; }
+        to { transform: translateX(0); opacity: 1; }
     }
 
     @keyframes slideOut {
-        from {
-            transform: translateX(0);
-            opacity: 1;
-        }
-        to {
-            transform: translateX(100%);
-            opacity: 0;
-        }
+        from { transform: translateX(0); opacity: 1; }
+        to { transform: translateX(100%); opacity: 0; }
     }
 
-    .low-risk { color: #10b981 !important; }
-    .medium-risk { color: #f59e0b !important; }
-    .high-risk { color: #ef4444 !important; }
+    .low-risk { color: var(--success-color) !important; }
+    .medium-risk { color: var(--warning-color) !important; }
+    .high-risk { color: var(--error-color) !important; }
 
-    .severity-critical { background: #fee2e2; color: #991b1b; }
-    .severity-high { background: #fef3c7; color: #92400e; }
-    .severity-medium { background: #dbeafe; color: #1e40af; }
-    .severity-low { background: #dcfce7; color: #166534; }
+    .severity-critical { background: rgba(239,68,68,0.1); color: var(--error-color); }
+    .severity-high { background: rgba(245,158,11,0.08); color: var(--warning-color); }
+    .severity-medium { background: rgba(37,99,235,0.06); color: var(--primary-color); }
+    .severity-low { background: rgba(16,185,129,0.06); color: var(--success-color); }
 
-    .safety-safe { background: #dcfce7; color: #166534; }
-    .safety-risky { background: #fef3c7; color: #92400e; }
+    .safety-safe { background: rgba(16,185,129,0.06); color: var(--success-color); }
+    .safety-risky { background: rgba(245,158,11,0.06); color: var(--warning-color); }
 
-    .status-active { background: #dcfce7; color: #166534; }
-    .status-deprecated { background: #fef3c7; color: #92400e; }
-    .status-abandoned { background: #fee2e2; color: #991b1b; }
+    .status-active { background: rgba(16,185,129,0.06); color: var(--success-color); }
+    .status-deprecated { background: rgba(245,158,11,0.06); color: var(--warning-color); }
+    .status-abandoned { background: rgba(239,68,68,0.06); color: var(--error-color); }
 
     .no-issues {
         text-align: center;
-        color: #10b981;
+        color: var(--success-color);
         font-size: 1.125rem;
         padding: 2rem;
     }
 
     .error {
         text-align: center;
-        color: #ef4444;
+        color: var(--error-color);
         font-size: 1.125rem;
         padding: 2rem;
     }
@@ -770,66 +1128,68 @@ style.textContent = `
     }
 
     .project-card, .add-project-card {
-        background: white;
-        border: 1px solid #e2e8f0;
+        background: var(--card-background);
+        border: 1px solid var(--border-color);
         border-radius: 0.5rem;
         padding: 1.5rem;
+        color: var(--text-primary);
     }
 
     .project-path {
         font-size: 0.8rem;
-        color: #6b7280;
+        color: var(--text-secondary);
         word-break: break-all;
         margin-bottom: 1rem;
     }
 
-    .project-status .status-idle { color: #6b7280; }
-    .project-status .status-scanning { color: #2563eb; }
+    .project-status .status-idle { color: var(--text-secondary); }
+    .project-status .status-scanning { color: var(--primary-color); }
 
-    .start-scan-btn {
-        width: 100%;
-        margin-top: 1rem;
-    }
+    .start-scan-btn { width: 100%; margin-top: 1rem; }
 
     .issue-item {
-        background: white;
-        border: 1px solid #e2e8f0;
+        background: var(--card-background);
+        border: 1px solid var(--border-color);
         border-radius: 0.5rem;
         padding: 1rem;
         margin-bottom: 1rem;
+        color: var(--text-primary);
     }
 
-    .issue-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 0.5rem;
-    }
+    .issue-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }
 
-    .issue-id, .issue-package {
-        font-weight: 600;
-        color: #2563eb;
-    }
+    .issue-id, .issue-package { font-weight: 600; color: var(--primary-color); }
 
     .issue-severity, .issue-safety, .issue-maintenance {
-        padding: 0.25rem 0.5rem;
-        border-radius: 0.25rem;
-        font-size: 0.75rem;
-        font-weight: 500;
-        text-transform: uppercase;
+        padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; font-weight: 500; text-transform: uppercase;
     }
 
-    .issue-description {
-        margin-bottom: 0.5rem;
-        color: #4b5563;
-    }
+    .issue-description { margin-bottom: 0.5rem; color: var(--text-secondary); }
 
     .issue-location, .issue-package, .issue-cvss, .issue-effort,
     .issue-references, .issue-versions, .issue-issues {
         font-size: 0.875rem;
-        color: #6b7280;
+        color: var(--text-secondary);
         margin-bottom: 0.25rem;
     }
 `;
 
 document.head.appendChild(style);
+
+// Expose thin global wrappers so inline onclick handlers in index.html work reliably.
+// They simply delegate to the dashboard instance.
+window.filterNodes = function(type) { if (window.dashboard && typeof window.dashboard.filterNodes === 'function') window.dashboard.filterNodes(type); };
+window.refreshIssues = function() { if (window.dashboard && typeof window.dashboard.refreshIssues === 'function') window.dashboard.refreshIssues(); };
+window.refreshCoverage = function() { if (window.dashboard && typeof window.dashboard.refreshCoverage === 'function') window.dashboard.refreshCoverage(); };
+window.saveSettings = function() { if (window.dashboard && typeof window.dashboard.saveSettings === 'function') window.dashboard.saveSettings(); };
+window.resetSettings = function() { if (window.dashboard && typeof window.dashboard.resetSettings === 'function') window.dashboard.resetSettings(); };
+window.selectFolder = function() { if (window.dashboard && typeof window.dashboard.selectFolder === 'function') window.dashboard.selectFolder(); };
+window.startScan = function(projectId) { if (window.dashboard && typeof window.dashboard.startScan === 'function') window.dashboard.startScan(projectId); };
+window.connectLocalProject = function() { if (window.dashboard && typeof window.dashboard.connectLocalProject === 'function') window.dashboard.connectLocalProject(); };
+window.connectGitHubProject = function() { if (window.dashboard && typeof window.dashboard.connectGitHubProject === 'function') window.dashboard.connectGitHubProject(); };
+window.authenticateGitHub = function() { if (window.dashboard && typeof window.dashboard.authenticateGitHub === 'function') window.dashboard.authenticateGitHub(); };
+window.loadProjects = function() { if (window.dashboard && typeof window.dashboard.loadProjects === 'function') window.dashboard.loadProjects(); };
+window.loadKnowledgeGraph = function() { if (window.dashboard && typeof window.dashboard.loadKnowledgeGraph === 'function') window.dashboard.loadKnowledgeGraph(); };
+
+// Note: Folder browse buttons use inline onclick handlers to maintain user activation context
+// for the File System Access API. Event delegation would break this requirement.

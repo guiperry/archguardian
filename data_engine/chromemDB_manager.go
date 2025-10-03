@@ -2,10 +2,13 @@ package data_engine
 
 import (
 	"archguardian/types"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -52,20 +55,15 @@ func NewChromemManager(dbPath string) (*ChromemManager, error) {
 		return nil, fmt.Errorf("failed to create Chromem client: %w", errDb)
 	}
 
-	// Use the default embedding function provided by chromem-go
-	// Note: chromem.DefaultEmbeddingFunc() doesn't exist, using nil for now
-	// The embedding function will be handled by the collection's default
-	embedFunc := chromem.EmbeddingFunc(nil)
-
-	// Get or create node collection
-	nodeColl, err := client.GetOrCreateCollection("nodes", nil, embedFunc)
+	// Get or create node collection (using nil for embedding function for now)
+	nodeColl, err := client.GetOrCreateCollection("nodes", nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get/create nodes collection: %w", err)
 	}
 	log.Printf("ChromemDB Manager: 'nodes' collection ready.")
 
-	// Get or create risk collection
-	riskColl, err := client.GetOrCreateCollection("risks", nil, embedFunc)
+	// Get or create risk collection (using nil for embedding function for now)
+	riskColl, err := client.GetOrCreateCollection("risks", nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get/create risks collection: %w", err)
 	}
@@ -76,7 +74,7 @@ func NewChromemManager(dbPath string) (*ChromemManager, error) {
 		nodeCollection: nodeColl,
 		riskCollection: riskColl,
 		dbPath:         dbPath,
-		ef:             embedFunc,
+		ef:             nil, // Will generate embeddings manually
 	}, nil
 }
 
@@ -115,11 +113,26 @@ func (m *ChromemManager) UpsertNode(node *types.Node) error {
 		"node_data":    string(nodeJSON), // Store the full node object
 	}
 
+	// Generate embeddings for the document
+	embeddings64, err := createEmbeddingFunction()([]string{documentContent})
+	if err != nil {
+		return fmt.Errorf("failed to generate embeddings for node %s: %w", docID, err)
+	}
+
+	// Convert float64 to float32
+	embeddings := make([][]float32, len(embeddings64))
+	for i, emb := range embeddings64 {
+		embeddings[i] = make([]float32, len(emb))
+		for j, val := range emb {
+			embeddings[i][j] = float32(val)
+		}
+	}
+
 	// chromem-go's Add method also performs an upsert if the ID exists.
 	err = m.nodeCollection.Add(
 		context.Background(),
 		[]string{docID}, // ids
-		nil,             // embeddings - let EF handle it from documents
+		embeddings,      // embeddings
 		[]map[string]string{stringifyMetadata(metadata)},
 		[]string{documentContent}, // documents
 	)
@@ -183,7 +196,22 @@ func (m *ChromemManager) StoreRiskAssessment(assessment *types.RiskAssessment) e
 		return nil // Nothing to store
 	}
 
-	err := m.riskCollection.Add(context.Background(), ids, nil, metadatas, documents)
+	// Generate embeddings for all documents
+	embeddings64, err := createEmbeddingFunction()(documents)
+	if err != nil {
+		return fmt.Errorf("failed to generate embeddings for risk assessment: %w", err)
+	}
+
+	// Convert float64 to float32
+	embeddings := make([][]float32, len(embeddings64))
+	for i, emb := range embeddings64 {
+		embeddings[i] = make([]float32, len(emb))
+		for j, val := range emb {
+			embeddings[i][j] = float32(val)
+		}
+	}
+
+	err = m.riskCollection.Add(context.Background(), ids, embeddings, metadatas, documents)
 	if err != nil {
 		return fmt.Errorf("failed to store risk assessment items: %w", err)
 	}
@@ -212,6 +240,68 @@ func (m *ChromemManager) QueryNodes(query string, limit int) ([]*types.Node, err
 		}
 	}
 	return nodes, nil
+}
+
+// createEmbeddingFunction creates an embedding function that calls the CloudFlare worker
+func createEmbeddingFunction() func([]string) ([][]float64, error) {
+	return func(texts []string) ([][]float64, error) {
+		if len(texts) == 0 {
+			return [][]float64{}, nil
+		}
+
+		// Prepare request payload
+		reqBody := map[string]interface{}{
+			"texts": texts,
+		}
+
+		jsonData, err := json.Marshal(reqBody)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal embedding request: %w", err)
+		}
+
+		// Create HTTP request
+		req, err := http.NewRequest("POST", "https://embeddings.knirv.com", bytes.NewBuffer(jsonData))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create embedding request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		// Make HTTP request
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to call embedding service: %w", err)
+		}
+		defer resp.Body.Close()
+
+		// Read response
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read embedding response: %w", err)
+		}
+
+		// Check status code
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("embedding service returned status %d: %s", resp.StatusCode, string(body))
+		}
+
+		// Parse response
+		var response struct {
+			Success   bool        `json:"success"`
+			Embeddings [][]float64 `json:"embeddings"`
+			Error     string      `json:"error,omitempty"`
+		}
+
+		if err := json.Unmarshal(body, &response); err != nil {
+			return nil, fmt.Errorf("failed to parse embedding response: %w", err)
+		}
+
+		if !response.Success {
+			return nil, fmt.Errorf("embedding service error: %s", response.Error)
+		}
+
+		return response.Embeddings, nil
+	}
 }
 
 // stringifyMetadata converts map[string]interface{} to map[string]string for chromem-go.

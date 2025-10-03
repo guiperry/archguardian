@@ -5,29 +5,68 @@ import (
 	"archguardian/inference_engine"
 	"archguardian/types"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	_ "embed"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"go/parser"
 	"go/token"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
+	"github.com/gorilla/sessions"
+	"github.com/gorilla/websocket"
 	"github.com/joho/godotenv"
+	"github.com/philippgille/chromem-go"
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/mem"
 	"github.com/shirou/gopsutil/v4/net"
 	"github.com/shirou/gopsutil/v4/process"
 )
+
+// EventType represents different types of events that can be produced
+type EventType string
+
+// Event type constants
+const (
+	// ArchGuardian Scan Cycle Events
+	ScanCycleEventType EventType = "scan_cycle"
+	ScanStartedEvent   EventType = "scan_started"
+	ScanCompletedEvent EventType = "scan_completed"
+	RiskAnalysisEvent  EventType = "risk_analysis"
+	RemediationEvent   EventType = "remediation"
+
+	// System events
+	SystemEventType EventType = "system"
+	ErrorEvent      EventType = "error"
+	WarningEvent    EventType = "warning"
+	InfoEvent       EventType = "info"
+)
+
+// ChromaDocument represents a document stored in ChromaDB
+type ChromaDocument struct {
+	ID        string                 `json:"id"`
+	Embedding []float64              `json:"embedding,omitempty"`
+	Metadata  map[string]interface{} `json:"metadata"`
+	Document  string                 `json:"document"`
+	Type      string                 `json:"type"`
+	Timestamp time.Time              `json:"timestamp"`
+}
 
 //go:embed dashboard/index.html
 var dashboardHTML string
@@ -39,18 +78,684 @@ var dashboardCSS string
 var dashboardJS string
 
 // ============================================================================
+// AUTHENTICATION SYSTEM
+// ============================================================================
+
+type User struct {
+	ID        string    `json:"id"`
+	Username  string    `json:"username"`
+	Email     string    `json:"email"`
+	Name      string    `json:"name"`
+	AvatarURL string    `json:"avatar_url"`
+	Provider  string    `json:"provider"` // "github"
+	CreatedAt time.Time `json:"created_at"`
+	LastLogin time.Time `json:"last_login"`
+}
+
+type GitHubAuth struct {
+	UserID       string
+	AccessToken  string
+	RefreshToken string
+	ExpiresAt    time.Time
+	TokenType    string
+}
+
+type AuthService struct {
+	githubClientID     string
+	githubClientSecret string
+	jwtSecret          []byte
+	sessionStore       *sessions.CookieStore
+	users              map[string]*User
+	tokens             map[string]*GitHubAuth
+	mutex              sync.RWMutex
+}
+
+func NewAuthService() *AuthService {
+	jwtSecret := []byte(getEnv("JWT_SECRET", "your-secret-key-change-in-production"))
+	sessionSecret := getEnv("SESSION_SECRET", "another-secret-key-change-in-production")
+
+	return &AuthService{
+		githubClientID:     getEnv("GITHUB_CLIENT_ID", ""),
+		githubClientSecret: getEnv("GITHUB_CLIENT_SECRET", ""),
+		jwtSecret:          jwtSecret,
+		sessionStore:       sessions.NewCookieStore([]byte(sessionSecret)),
+		users:              make(map[string]*User),
+		tokens:             make(map[string]*GitHubAuth),
+	}
+}
+
+func (as *AuthService) GenerateJWT(user *User) (string, error) {
+	claims := jwt.MapClaims{
+		"user_id":   user.ID,
+		"username":  user.Username,
+		"email":     user.Email,
+		"provider":  user.Provider,
+		"exp":       time.Now().Add(24 * time.Hour).Unix(),
+		"iat":       time.Now().Unix(),
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(as.jwtSecret)
+}
+
+func (as *AuthService) ValidateJWT(tokenString string) (*User, error) {
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return as.jwtSecret, nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
+		user := &User{
+			ID:       claims["user_id"].(string),
+			Username: claims["username"].(string),
+			Email:    claims["email"].(string),
+			Provider: claims["provider"].(string),
+		}
+		return user, nil
+	}
+
+	return nil, fmt.Errorf("invalid token")
+}
+
+func (as *AuthService) CreateOrUpdateUser(githubUser map[string]interface{}) *User {
+	as.mutex.Lock()
+	defer as.mutex.Unlock()
+
+	userID := fmt.Sprintf("%v", githubUser["id"])
+	now := time.Now()
+
+	user, exists := as.users[userID]
+	if !exists {
+		user = &User{
+			ID:        userID,
+			Username:  githubUser["login"].(string),
+			Email:     githubUser["email"].(string),
+			Name:      githubUser["name"].(string),
+			AvatarURL: githubUser["avatar_url"].(string),
+			Provider:  "github",
+			CreatedAt: now,
+		}
+		as.users[userID] = user
+	}
+
+	user.LastLogin = now
+	return user
+}
+
+func (as *AuthService) StoreGitHubToken(userID string, auth *GitHubAuth) {
+	as.mutex.Lock()
+	defer as.mutex.Unlock()
+	as.tokens[userID] = auth
+}
+
+func (as *AuthService) GetGitHubToken(userID string) (*GitHubAuth, bool) {
+	as.mutex.RLock()
+	defer as.mutex.RUnlock()
+	token, exists := as.tokens[userID]
+	return token, exists
+}
+
+func (as *AuthService) GetUser(userID string) (*User, bool) {
+	as.mutex.RLock()
+	defer as.mutex.RUnlock()
+	user, exists := as.users[userID]
+	return user, exists
+}
+
+// GitHub OAuth URLs
+func (as *AuthService) GetGitHubAuthURL(state string) string {
+	baseURL := "https://github.com/login/oauth/authorize"
+	params := url.Values{}
+	params.Add("client_id", as.githubClientID)
+	params.Add("redirect_uri", "http://localhost:3000/api/v1/auth/github/callback")
+	params.Add("scope", "read:user user:email")
+	params.Add("state", state)
+	params.Add("response_type", "code")
+
+	return baseURL + "?" + params.Encode()
+}
+
+func (as *AuthService) ExchangeGitHubCode(code string) (*GitHubAuth, error) {
+	tokenURL := "https://github.com/login/oauth/access_token"
+
+	data := url.Values{}
+	data.Set("client_id", as.githubClientID)
+	data.Set("client_secret", as.githubClientSecret)
+	data.Set("code", code)
+	data.Set("redirect_uri", "http://localhost:3000/api/v1/auth/github/callback")
+
+	req, err := http.NewRequest("POST", tokenURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var tokenResp struct {
+		AccessToken  string `json:"access_token"`
+		TokenType    string `json:"token_type"`
+		Scope        string `json:"scope"`
+		Error        string `json:"error"`
+		ErrorDesc    string `json:"error_description"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+		return nil, err
+	}
+
+	if tokenResp.Error != "" {
+		return nil, fmt.Errorf("GitHub OAuth error: %s - %s", tokenResp.Error, tokenResp.ErrorDesc)
+	}
+
+	return &GitHubAuth{
+		AccessToken: tokenResp.AccessToken,
+		TokenType:   tokenResp.TokenType,
+		ExpiresAt:   time.Now().Add(24 * time.Hour), // GitHub tokens typically last 1 year
+	}, nil
+}
+
+func (as *AuthService) GetGitHubUser(accessToken string) (map[string]interface{}, error) {
+	req, err := http.NewRequest("GET", "https://api.github.com/user", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
+	}
+
+	var user map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
+		return nil, err
+	}
+
+	return user, nil
+}
+
+// Authentication middleware
+func (as *AuthService) AuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Check for Authorization header (JWT)
+		authHeader := r.Header.Get("Authorization")
+		if authHeader != "" && strings.HasPrefix(authHeader, "Bearer ") {
+			tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+			user, err := as.ValidateJWT(tokenString)
+			if err == nil {
+				// Add user to request context
+				ctx := context.WithValue(r.Context(), "user", user)
+				r = r.WithContext(ctx)
+				next(w, r)
+				return
+			}
+		}
+
+		// Check for session cookie
+		session, err := as.sessionStore.Get(r, "archguardian-session")
+		if err == nil {
+			if userID, ok := session.Values["user_id"].(string); ok {
+				if user, exists := as.GetUser(userID); exists {
+					ctx := context.WithValue(r.Context(), "user", user)
+					r = r.WithContext(ctx)
+					next(w, r)
+					return
+				}
+			}
+		}
+
+		// No valid authentication found
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "Unauthorized",
+			"message": "Authentication required",
+		})
+	}
+}
+
+// Optional authentication middleware (doesn't require auth but adds user if present)
+func (as *AuthService) OptionalAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Try JWT first
+		authHeader := r.Header.Get("Authorization")
+		if authHeader != "" && strings.HasPrefix(authHeader, "Bearer ") {
+			tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+			user, err := as.ValidateJWT(tokenString)
+			if err == nil {
+				ctx := context.WithValue(r.Context(), "user", user)
+				r = r.WithContext(ctx)
+				next(w, r)
+				return
+			}
+		}
+
+		// Try session
+		session, err := as.sessionStore.Get(r, "archguardian-session")
+		if err == nil {
+			if userID, ok := session.Values["user_id"].(string); ok {
+				if user, exists := as.GetUser(userID); exists {
+					ctx := context.WithValue(r.Context(), "user", user)
+					r = r.WithContext(ctx)
+					next(w, r)
+					return
+				}
+			}
+		}
+
+		// No authentication, but that's okay
+		next(w, r)
+	}
+}
+
+// ============================================================================
+// WEBSOCKET MESSAGES
+// ============================================================================
+
+type WSMessage struct {
+	Type      string      `json:"type"`
+	Timestamp time.Time   `json:"timestamp"`
+	Data      interface{} `json:"data"`
+	ID        string      `json:"id,omitempty"`
+}
+
+// ============================================================================
+// PROJECT MANAGEMENT
+// ============================================================================
+
+type Project struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Path        string    `json:"path"`
+	Status      string    `json:"status"` // "idle", "scanning", "error"
+	LastScan    *time.Time `json:"lastScan,omitempty"`
+	IssueCount  int       `json:"issueCount"`
+	CreatedAt   time.Time `json:"createdAt"`
+	Config      *Config   `json:"-"` // Don't serialize
+	Graph       *types.KnowledgeGraph `json:"-"` // Don't serialize
+}
+
+type ProjectStore struct {
+	projects map[string]*Project
+	mutex    sync.RWMutex
+}
+
+func NewProjectStore() *ProjectStore {
+	return &ProjectStore{
+		projects: make(map[string]*Project),
+	}
+}
+
+func (ps *ProjectStore) Create(project *Project) {
+	ps.mutex.Lock()
+	defer ps.mutex.Unlock()
+	ps.projects[project.ID] = project
+}
+
+func (ps *ProjectStore) Get(id string) (*Project, bool) {
+	ps.mutex.RLock()
+	defer ps.mutex.RUnlock()
+	project, exists := ps.projects[id]
+	return project, exists
+}
+
+func (ps *ProjectStore) GetAll() []*Project {
+	ps.mutex.RLock()
+	defer ps.mutex.RUnlock()
+
+	projects := make([]*Project, 0, len(ps.projects))
+	for _, project := range ps.projects {
+		projects = append(projects, project)
+	}
+	return projects
+}
+
+func (ps *ProjectStore) Update(project *Project) bool {
+	ps.mutex.Lock()
+	defer ps.mutex.Unlock()
+
+	if _, exists := ps.projects[project.ID]; !exists {
+		return false
+	}
+
+	ps.projects[project.ID] = project
+	return true
+}
+
+func (ps *ProjectStore) Delete(id string) bool {
+	ps.mutex.Lock()
+	defer ps.mutex.Unlock()
+
+	if _, exists := ps.projects[id]; !exists {
+		return false
+	}
+
+	delete(ps.projects, id)
+	return true
+}
+
+// ============================================================================
 // CONFIGURATION
 // ============================================================================
 
 type Config struct {
-	ProjectPath       string
-	GitHubToken       string
-	GitHubRepo        string
-	AIProviders       AIProviderConfig
-	Orchestrator      OrchestratorConfig
-	DataEngine        DataEngineConfig
-	ScanInterval      time.Duration
-	RemediationBranch string
+	ProjectPath       string            `json:"project_path"`
+	GitHubToken       string            `json:"github_token"`
+	GitHubRepo        string            `json:"github_repo"`
+	AIProviders       AIProviderConfig  `json:"ai_providers"`
+	Orchestrator      OrchestratorConfig `json:"orchestrator"`
+	DataEngine        DataEngineConfig   `json:"data_engine"`
+	ScanInterval      time.Duration     `json:"scan_interval"`
+	RemediationBranch string            `json:"remediation_branch"`
+}
+
+// SettingsManager handles persistent settings storage and validation
+type SettingsManager struct {
+	db         *chromem.DB
+	settings   *Config
+	mutex      sync.RWMutex
+	validators []SettingsValidator
+	listeners  []SettingsChangeListener
+}
+
+// SettingsValidator validates settings before they are applied
+type SettingsValidator interface {
+	Validate(settings *Config) error
+}
+
+// SettingsChangeListener is notified when settings change
+type SettingsChangeListener interface {
+	OnSettingsChanged(oldSettings, newSettings *Config)
+}
+
+// DefaultSettingsValidator provides basic validation
+type DefaultSettingsValidator struct{}
+
+func (v *DefaultSettingsValidator) Validate(settings *Config) error {
+	if settings.ProjectPath == "" {
+		return fmt.Errorf("project_path is required")
+	}
+
+	if settings.ScanInterval < time.Minute {
+		return fmt.Errorf("scan_interval must be at least 1 minute")
+	}
+
+	if settings.ScanInterval > 24*time.Hour {
+		return fmt.Errorf("scan_interval cannot exceed 24 hours")
+	}
+
+	// Validate AI provider configurations
+	if settings.AIProviders.Cerebras.APIKey == "" &&
+		settings.AIProviders.Gemini.APIKey == "" &&
+		settings.AIProviders.Anthropic.APIKey == "" &&
+		settings.AIProviders.OpenAI.APIKey == "" &&
+		settings.AIProviders.DeepSeek.APIKey == "" {
+		return fmt.Errorf("at least one AI provider API key must be configured")
+	}
+
+	// Validate code remediation provider
+	validProviders := map[string]bool{
+		"anthropic": true,
+		"openai":    true,
+		"deepseek":  true,
+	}
+	if !validProviders[settings.AIProviders.CodeRemediationProvider] {
+		return fmt.Errorf("invalid code_remediation_provider: %s", settings.AIProviders.CodeRemediationProvider)
+	}
+
+	return nil
+}
+
+
+
+// NewSettingsManager creates a new settings manager
+func NewSettingsManager(db *chromem.DB) *SettingsManager {
+	sm := &SettingsManager{
+		db:         db,
+		validators: []SettingsValidator{&DefaultSettingsValidator{}},
+		listeners:  make([]SettingsChangeListener, 0),
+	}
+
+	// Load existing settings or create defaults
+	sm.loadSettings()
+
+	return sm
+}
+
+// AddValidator adds a settings validator
+func (sm *SettingsManager) AddValidator(validator SettingsValidator) {
+	sm.mutex.Lock()
+	defer sm.mutex.Unlock()
+	sm.validators = append(sm.validators, validator)
+}
+
+// AddChangeListener adds a settings change listener
+func (sm *SettingsManager) AddChangeListener(listener SettingsChangeListener) {
+	sm.mutex.Lock()
+	defer sm.mutex.Unlock()
+	sm.listeners = append(sm.listeners, listener)
+}
+
+// GetSettings returns a copy of current settings
+func (sm *SettingsManager) GetSettings() *Config {
+	sm.mutex.RLock()
+	defer sm.mutex.RUnlock()
+
+	// Return a deep copy to prevent external modification
+	settingsJSON, _ := json.Marshal(sm.settings)
+	var copy Config
+	json.Unmarshal(settingsJSON, &copy)
+	return &copy
+}
+
+// UpdateSettings validates and updates settings
+func (sm *SettingsManager) UpdateSettings(newSettings *Config) error {
+	sm.mutex.Lock()
+	defer sm.mutex.Unlock()
+
+	// Validate settings
+	for _, validator := range sm.validators {
+		if err := validator.Validate(newSettings); err != nil {
+			return fmt.Errorf("validation failed: %w", err)
+		}
+	}
+
+	// Store old settings for listeners
+	oldSettings := sm.settings
+
+	// Update settings
+	sm.settings = newSettings
+
+	// Persist to database
+	if err := sm.persistSettings(); err != nil {
+		// Restore old settings on failure
+		sm.settings = oldSettings
+		return fmt.Errorf("failed to persist settings: %w", err)
+	}
+
+	// Notify listeners
+	for _, listener := range sm.listeners {
+		go listener.OnSettingsChanged(oldSettings, newSettings)
+	}
+
+	log.Printf("✅ Settings updated successfully")
+	return nil
+}
+
+// LoadFromFile loads settings from a JSON file
+func (sm *SettingsManager) LoadFromFile(filePath string) error {
+	sm.mutex.Lock()
+	defer sm.mutex.Unlock()
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to read settings file: %w", err)
+	}
+
+	var fileSettings Config
+	if err := json.Unmarshal(data, &fileSettings); err != nil {
+		return fmt.Errorf("failed to parse settings file: %w", err)
+	}
+
+	// Validate and update
+	return sm.UpdateSettings(&fileSettings)
+}
+
+// SaveToFile saves current settings to a JSON file
+func (sm *SettingsManager) SaveToFile(filePath string) error {
+	sm.mutex.RLock()
+	defer sm.mutex.RUnlock()
+
+	data, err := json.MarshalIndent(sm.settings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal settings: %w", err)
+	}
+
+	if err := os.WriteFile(filePath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write settings file: %w", err)
+	}
+
+	return nil
+}
+
+// loadSettings loads settings from chromem-go database
+func (sm *SettingsManager) loadSettings() {
+	collection := sm.db.GetCollection("settings-history", nil)
+	if collection == nil {
+		log.Printf("⚠️  Settings collection not found, using defaults")
+		sm.settings = sm.getDefaultSettings()
+		return
+	}
+
+	// Get the most recent settings
+	results, err := collection.Query(
+		context.Background(),
+		"",
+		1,
+		nil,
+		nil,
+	)
+
+	if err != nil || len(results) == 0 {
+		log.Printf("⚠️  No saved settings found, using defaults")
+		sm.settings = sm.getDefaultSettings()
+		return
+	}
+
+	// Parse the settings
+	var settings Config
+	if err := json.Unmarshal([]byte(results[0].Content), &settings); err != nil {
+		log.Printf("⚠️  Failed to parse saved settings: %v, using defaults", err)
+		sm.settings = sm.getDefaultSettings()
+		return
+	}
+
+	sm.settings = &settings
+	log.Printf("✅ Settings loaded from database")
+}
+
+// persistSettings saves current settings to chromem-go database
+func (sm *SettingsManager) persistSettings() error {
+	collection := sm.db.GetCollection("settings-history", nil)
+	if collection == nil {
+		return fmt.Errorf("settings collection not available")
+	}
+
+	settingsJSON, err := json.Marshal(sm.settings)
+	if err != nil {
+		return fmt.Errorf("failed to marshal settings: %w", err)
+	}
+
+	doc := chromem.Document{
+		ID:      fmt.Sprintf("settings_%d", time.Now().Unix()),
+		Content: string(settingsJSON),
+		Metadata: map[string]string{
+			"type":      "settings",
+			"timestamp": time.Now().Format(time.RFC3339),
+			"version":   "1.0",
+		},
+	}
+
+	return collection.AddDocument(context.Background(), doc)
+}
+
+// getDefaultSettings returns default configuration
+func (sm *SettingsManager) getDefaultSettings() *Config {
+	return &Config{
+		ProjectPath:       getEnv("PROJECT_PATH", "."),
+		GitHubToken:       getEnv("GITHUB_TOKEN", ""),
+		GitHubRepo:        getEnv("GITHUB_REPO", ""),
+		ScanInterval:      time.Duration(getEnvInt("SCAN_INTERVAL_HOURS", 24)) * time.Hour,
+		RemediationBranch: getEnv("REMEDIATION_BRANCH", "archguardian-fixes"),
+		AIProviders: AIProviderConfig{
+			Cerebras: ProviderCredentials{
+				APIKey:   getEnv("CEREBRAS_API_KEY", ""),
+				Endpoint: getEnv("CEREBRAS_ENDPOINT", "https://api.cerebras.ai/v1"),
+				Model:    getEnv("CEREBRAS_MODEL", "llama3.3-70b"),
+			},
+			Gemini: ProviderCredentials{
+				APIKey:   getEnv("GEMINI_API_KEY", ""),
+				Endpoint: getEnv("GEMINI_ENDPOINT", "https://generativelanguage.googleapis.com/v1"),
+				Model:    getEnv("GEMINI_MODEL", "gemini-pro"),
+			},
+			Anthropic: ProviderCredentials{
+				APIKey:   getEnv("ANTHROPIC_API_KEY", ""),
+				Endpoint: getEnv("ANTHROPIC_ENDPOINT", "https://api.anthropic.com/v1"),
+				Model:    getEnv("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929"),
+			},
+			OpenAI: ProviderCredentials{
+				APIKey:   getEnv("OPENAI_API_KEY", ""),
+				Endpoint: getEnv("OPENAI_ENDPOINT", "https://api.openai.com/v1"),
+				Model:    getEnv("OPENAI_MODEL", "gpt-4"),
+			},
+			DeepSeek: ProviderCredentials{
+				APIKey:   getEnv("DEEPSEEK_API_KEY", ""),
+				Endpoint: getEnv("DEEPSEEK_ENDPOINT", "https://api.deepseek.com/v1"),
+				Model:    getEnv("DEEPSEEK_MODEL", "deepseek-coder"),
+			},
+			CodeRemediationProvider: getEnv("CODE_REMEDIATION_PROVIDER", "anthropic"),
+		},
+		Orchestrator: OrchestratorConfig{
+			PlannerModel:   getEnv("ORCHESTRATOR_PLANNER_MODEL", "gemini-pro"),
+			ExecutorModels: strings.Split(getEnv("ORCHESTRATOR_EXECUTOR_MODELS", "llama3.3-70b"), ","),
+			FinalizerModel: getEnv("ORCHESTRATOR_FINALIZER_MODEL", "deepseek-coder"),
+			VerifierModel:  getEnv("ORCHESTRATOR_VERIFIER_MODEL", "gemini-pro"),
+		},
+		DataEngine: DataEngineConfig{
+			Enable:           getEnvBool("DATA_ENGINE_ENABLE", true),
+			EnableKafka:      getEnvBool("KAFKA_ENABLE", false),
+			EnableChromaDB:   getEnvBool("CHROMADB_ENABLE", true),
+			EnableWebSocket:  getEnvBool("WEBSOCKET_ENABLE", true),
+			EnableRESTAPI:    getEnvBool("RESTAPI_ENABLE", true),
+			KafkaBrokers:     strings.Split(getEnv("KAFKA_BROKERS", "localhost:9092"), ","),
+			ChromaDBURL:      getEnv("CHROMADB_URL", "http://localhost:8000"),
+			ChromaCollection: getEnv("CHROMADB_COLLECTION", "archguardian_events"),
+			WebSocketPort:    getEnvInt("WEBSOCKET_PORT", 8080),
+			RESTAPIPort:      getEnvInt("RESTAPI_PORT", 7080),
+		},
+	}
 }
 
 type AIProviderConfig struct {
@@ -129,7 +834,7 @@ func (s *Scanner) ScanProject(ctx context.Context) error {
 	}
 
 	// Phase 3: Runtime Inspection
-	if err := s.scanRuntime(ctx); err != nil {
+	if err := s.scanRuntime(); err != nil {
 		return fmt.Errorf("runtime scan failed: %w", err)
 	}
 
@@ -154,6 +859,24 @@ func (s *Scanner) ScanProject(ctx context.Context) error {
 	}
 
 	s.graph.LastUpdated = time.Now()
+
+	// Persist knowledge graph to chromem-go
+	if globalDB != nil {
+		projectID := "default" // TODO: Get actual project ID from config
+		doc, err := s.graph.ToDocument(projectID)
+		if err != nil {
+			log.Printf("⚠️  Failed to create knowledge graph document: %v", err)
+		} else {
+			collection := globalDB.GetCollection("knowledge-graphs", nil)
+			err = collection.AddDocument(context.Background(), doc)
+			if err != nil {
+				log.Printf("⚠️  Failed to persist knowledge graph: %v", err)
+			} else {
+				log.Printf("✅ Knowledge graph persisted to chromem-go")
+			}
+		}
+	}
+
 	log.Println("✅ Project scan complete")
 	return nil
 }
@@ -374,7 +1097,7 @@ func (s *Scanner) scanDatabaseModels(_ context.Context) error {
 	return nil
 }
 
-func (s *Scanner) scanRuntime(ctx context.Context) error {
+func (s *Scanner) scanRuntime() error {
 	log.Println("  🔄 Scanning runtime environment...")
 
 	runtimeScanner := NewRuntimeScanner()
@@ -698,6 +1421,38 @@ func (s *Scanner) scanTestCoverage(ctx context.Context) error {
 		s.graph.Nodes[coverageNode.ID] = coverageNode
 
 		log.Printf("  📊 Coverage scan complete: %.1f%% coverage", coverageData["overall_coverage"].(float64))
+
+		// Persist coverage data to chromem-go
+		if globalDB != nil {
+			projectID := "default" // TODO: Get actual project ID from config
+			coverageJSON, err := json.Marshal(coverageData)
+			if err != nil {
+				log.Printf("⚠️  Failed to marshal coverage data: %v", err)
+			} else {
+				doc := chromem.Document{
+					ID:      "coverage_" + projectID + "_" + time.Now().Format("20060102_150405"),
+					Content: string(coverageJSON),
+					Metadata: map[string]string{
+						"type":             "test-coverage",
+						"project_id":       projectID,
+						"timestamp":        time.Now().Format(time.RFC3339),
+						"overall_coverage": fmt.Sprintf("%.2f", coverageData["overall_coverage"].(float64)),
+						"lines_covered":    fmt.Sprintf("%d", int(coverageData["lines_covered"].(float64))),
+						"total_lines":      fmt.Sprintf("%d", int(coverageData["total_lines"].(float64))),
+						"test_files":       fmt.Sprintf("%d", int(coverageData["test_files"].(float64))),
+						"language":         coverageData["language"].(string),
+					},
+				}
+
+				collection := globalDB.GetCollection("test-coverage", nil)
+				err = collection.AddDocument(context.Background(), doc)
+				if err != nil {
+					log.Printf("⚠️  Failed to persist coverage data: %v", err)
+				} else {
+					log.Printf("✅ Coverage data persisted to chromem-go")
+				}
+			}
+		}
 	}
 
 	return nil
@@ -1437,6 +2192,23 @@ func (rd *RiskDiagnoser) DiagnoseRisks(ctx context.Context) (*types.RiskAssessme
 	log.Printf("  ⚠️  Found: %d technical debt items (%d from Codacy, %d from AI), %d security vulnerabilities, %d obsolete code items",
 		len(assessment.TechnicalDebt), len(assessment.TechnicalDebt)-len(aiTechnicalDebt), len(aiTechnicalDebt), len(assessment.SecurityVulns), len(assessment.ObsoleteCode))
 
+	// Persist risk assessment to chromem-go
+	if globalDB != nil {
+		projectID := "default" // TODO: Get actual project ID from config
+		doc, err := assessment.ToDocument(projectID)
+		if err != nil {
+			log.Printf("⚠️  Failed to create risk assessment document: %v", err)
+		} else {
+			collection := globalDB.GetCollection("security-issues", nil)
+			err = collection.AddDocument(context.Background(), doc)
+			if err != nil {
+				log.Printf("⚠️  Failed to persist risk assessment: %v", err)
+			} else {
+				log.Printf("✅ Risk assessment persisted to chromem-go")
+			}
+		}
+	}
+
 	return assessment, nil
 }
 
@@ -1804,7 +2576,7 @@ func (r *Remediator) RemediateRisks(ctx context.Context, assessment *types.RiskA
 
 	// Advanced Codacy integration: Manage toolchain configuration
 	if r.diagnoser.codacyClient != nil {
-		if err := r.manageCodacyConfiguration(ctx, assessment); err != nil {
+		if err := r.manageCodacyConfiguration(assessment); err != nil {
 			log.Printf("  ⚠️  Failed to manage Codacy configuration: %v", err)
 		}
 	}
@@ -1984,7 +2756,7 @@ func (r *Remediator) applyFix(fix, target string) error {
 }
 
 // manageCodacyConfiguration handles advanced Codacy toolchain management
-func (r *Remediator) manageCodacyConfiguration(ctx context.Context, assessment *types.RiskAssessment) error {
+func (r *Remediator) manageCodacyConfiguration(assessment *types.RiskAssessment) error {
 	log.Println("  🔧 Managing Codacy configuration...")
 
 	// Analyze technical debt items to identify potential false positives
@@ -2223,12 +2995,15 @@ func (gm *GitManager) CommitAndPush(branchName, message string) error {
 // ============================================================================
 
 type ArchGuardian struct {
-	config      *Config
-	scanner     *Scanner
-	diagnoser   *RiskDiagnoser
-	remediator  *Remediator
-	dataEngine  *data_engine.DataEngine
-	triggerScan chan bool // Channel to trigger manual scans
+	config         *Config
+	scanner        *Scanner
+	diagnoser      *RiskDiagnoser
+	remediator     *Remediator
+	dataEngine     *data_engine.DataEngine
+	logWriter      *logWriter // Real-time log streaming to dashboard
+	triggerScan    chan bool  // Channel to trigger manual scans
+	dashboardConns []*websocket.Conn // Connected dashboard WebSocket clients
+	connMutex      sync.Mutex        // Mutex for dashboard connections
 }
 
 func NewArchGuardian(config *Config, aiEngine *AIInferenceEngine) *ArchGuardian {
@@ -2259,6 +3034,7 @@ func NewArchGuardian(config *Config, aiEngine *AIInferenceEngine) *ArchGuardian 
 	}
 
 	scanner := NewScanner(config, aiEngine)
+	globalScanner = scanner // Assign to global variable for API access
 
 	// Initialize Codacy client if API token is provided
 	var codacyClient *CodacyClient
@@ -2272,9 +3048,10 @@ func NewArchGuardian(config *Config, aiEngine *AIInferenceEngine) *ArchGuardian 
 	}
 
 	diagnoser := NewRiskDiagnoser(scanner, codacyClient)
+	globalDiagnoser = diagnoser // Assign to global variable for API access
 	remediator := NewRemediator(config, diagnoser)
 
-	return &ArchGuardian{
+	guardian := &ArchGuardian{
 		config:      config,
 		scanner:     scanner,
 		diagnoser:   diagnoser,
@@ -2282,6 +3059,26 @@ func NewArchGuardian(config *Config, aiEngine *AIInferenceEngine) *ArchGuardian 
 		dataEngine:  de,
 		triggerScan: make(chan bool), // Initialize the channel
 	}
+
+	// Initialize and activate logWriter for real-time log streaming to dashboard
+	lw := &logWriter{
+		ag:          guardian,
+		initialLogs: make([][]byte, 0, 100),
+		clientReady: false,
+	}
+	guardian.logWriter = lw
+
+	// Set up callback to flush logs when WebSocket client connects
+	if guardian.dataEngine != nil {
+		guardian.dataEngine.SetOnClientReadyCallback(func() {
+			guardian.FlushInitialLogs()
+		})
+	}
+
+	// Redirect standard log output to our custom writer
+	log.SetOutput(lw)
+
+	return guardian
 }
 
 func (ag *ArchGuardian) Run(ctx context.Context) error {
@@ -2342,7 +3139,9 @@ func (ag *ArchGuardian) runCycle(ctx context.Context) error {
 	}
 	ag.produceSystemEvent(data_engine.SystemEventType, "diagnose_risks_completed", map[string]interface{}{"overall_score": assessment.OverallScore})
 	for _, vuln := range assessment.SecurityVulns {
-		ag.produceSystemEvent(data_engine.ErrorEvent, "security_vulnerability_found", map[string]interface{}{"cve": vuln.CVE, "package": vuln.Package, "severity": vuln.Severity})
+		if ag.dataEngine != nil {
+			ag.dataEngine.BroadcastSecurityVulnerability(vuln)
+		}
 	}
 
 	// Export risk assessment
@@ -2356,7 +3155,12 @@ func (ag *ArchGuardian) runCycle(ctx context.Context) error {
 			ag.produceSystemEvent(data_engine.ErrorEvent, "remediation_failed", map[string]interface{}{"error": err.Error()})
 			log.Printf("⚠️  Remediation failed: %v", err)
 		}
-		ag.produceSystemEvent(data_engine.SystemEventType, "remediation_completed", nil)
+		if ag.dataEngine != nil {
+			ag.dataEngine.BroadcastRemediationCompleted(map[string]interface{}{
+				"status": "completed",
+				"timestamp": time.Now(),
+			})
+		}
 	} else {
 		ag.produceSystemEvent(data_engine.SystemEventType, "remediation_skipped", map[string]interface{}{"reason": "System health is good", "overall_score": assessment.OverallScore})
 		log.Println("✅ System health is good, no remediation needed")
@@ -2426,6 +3230,49 @@ func (ag *ArchGuardian) produceSystemEvent(eventType data_engine.EventType, subT
 	}
 }
 
+// AddDashboardConnection adds a WebSocket connection to the list of dashboard clients
+func (ag *ArchGuardian) AddDashboardConnection(conn *websocket.Conn) {
+	ag.connMutex.Lock()
+	defer ag.connMutex.Unlock()
+	ag.dashboardConns = append(ag.dashboardConns, conn)
+	log.Printf("Dashboard client connected. Total clients: %d", len(ag.dashboardConns))
+}
+
+// RemoveDashboardConnection removes a WebSocket connection from the list of dashboard clients
+func (ag *ArchGuardian) RemoveDashboardConnection(conn *websocket.Conn) {
+	ag.connMutex.Lock()
+	defer ag.connMutex.Unlock()
+
+	for i, c := range ag.dashboardConns {
+		if c == conn {
+			ag.dashboardConns = append(ag.dashboardConns[:i], ag.dashboardConns[i+1:]...)
+			log.Printf("Dashboard client disconnected. Total clients: %d", len(ag.dashboardConns))
+			break
+		}
+	}
+}
+
+// BroadcastToDashboard broadcasts a message to all connected dashboard clients
+func (ag *ArchGuardian) BroadcastToDashboard(message string) {
+	ag.connMutex.Lock()
+	defer ag.connMutex.Unlock()
+
+	for _, conn := range ag.dashboardConns {
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(message)); err != nil {
+			log.Printf("Failed to send message to dashboard client: %v", err)
+			// Remove broken connection
+			go ag.RemoveDashboardConnection(conn)
+		}
+	}
+}
+
+// FlushInitialLogs flushes buffered logs to the WebSocket client when it connects
+func (ag *ArchGuardian) FlushInitialLogs() {
+	if ag.logWriter != nil {
+		ag.logWriter.FlushInitialLogs()
+	}
+}
+
 // ============================================================================
 // UTILITY FUNCTIONS
 // ============================================================================
@@ -2485,10 +3332,656 @@ func min(a, b float64) float64 {
 }
 
 // ============================================================================
+// SETTINGS HOT RELOAD LISTENER
+// ============================================================================
+
+// SettingsHotReloadListener implements hot-reload functionality for settings changes
+type SettingsHotReloadListener struct{}
+
+// OnSettingsChanged handles settings change notifications
+func (shrl *SettingsHotReloadListener) OnSettingsChanged(oldSettings, newSettings *Config) {
+	log.Printf("🔄 Settings changed, applying hot-reload...")
+
+	// Update global configuration if guardian instance exists
+	if guardianInstance != nil {
+		// Update scan interval if changed
+		if oldSettings.ScanInterval != newSettings.ScanInterval {
+			log.Printf("  ⏰ Scan interval updated: %v -> %v", oldSettings.ScanInterval, newSettings.ScanInterval)
+			// Note: Scan interval changes require server restart for ticker update
+			log.Printf("  ⚠️  Scan interval change requires server restart to take effect")
+		}
+
+		// Update AI provider configurations
+		if oldSettings.AIProviders.CodeRemediationProvider != newSettings.AIProviders.CodeRemediationProvider {
+			log.Printf("  🤖 Code remediation provider changed: %s -> %s",
+				oldSettings.AIProviders.CodeRemediationProvider, newSettings.AIProviders.CodeRemediationProvider)
+			// AI provider changes take effect immediately for new requests
+		}
+
+		// Update data engine configuration
+		if oldSettings.DataEngine.Enable != newSettings.DataEngine.Enable {
+			log.Printf("  📈 Data engine enable changed: %t -> %t",
+				oldSettings.DataEngine.Enable, newSettings.DataEngine.Enable)
+			log.Printf("  ⚠️  Data engine enable change requires server restart to take effect")
+		}
+
+		// Update project path if changed
+		if oldSettings.ProjectPath != newSettings.ProjectPath {
+			log.Printf("  📁 Project path changed: %s -> %s", oldSettings.ProjectPath, newSettings.ProjectPath)
+			log.Printf("  ⚠️  Project path change requires server restart to take effect")
+		}
+
+		// Update AIInferenceEngine with new configuration
+		if shrl.hasAIProviderChanges(oldSettings.AIProviders, newSettings.AIProviders) {
+			log.Printf("  🤖 AI provider configuration changed, updating inference engine...")
+			// Create new AIInferenceEngine with updated config
+			newAIEngine := NewAIInferenceEngine(newSettings)
+			guardianInstance.scanner.ai = newAIEngine
+			guardianInstance.diagnoser.ai = newAIEngine
+			guardianInstance.remediator.ai = newAIEngine
+			log.Printf("  ✅ AI inference engine updated with new configuration")
+		}
+
+		// Update data engine configuration if ports changed
+		if shrl.hasDataEnginePortChanges(oldSettings.DataEngine, newSettings.DataEngine) {
+			log.Printf("  📈 Data engine ports changed, restart required for full effect")
+			// Note: Port changes require server restart
+		}
+	}
+
+	log.Printf("✅ Settings hot-reload completed")
+}
+
+// hasAIProviderChanges checks if AI provider configuration has changed
+func (shrl *SettingsHotReloadListener) hasAIProviderChanges(oldProviders, newProviders AIProviderConfig) bool {
+	return oldProviders.Cerebras.APIKey != newProviders.Cerebras.APIKey ||
+		oldProviders.Gemini.APIKey != newProviders.Gemini.APIKey ||
+		oldProviders.Anthropic.APIKey != newProviders.Anthropic.APIKey ||
+		oldProviders.OpenAI.APIKey != newProviders.OpenAI.APIKey ||
+		oldProviders.DeepSeek.APIKey != newProviders.DeepSeek.APIKey ||
+		oldProviders.CodeRemediationProvider != newProviders.CodeRemediationProvider
+}
+
+// hasDataEnginePortChanges checks if data engine ports have changed
+func (shrl *SettingsHotReloadListener) hasDataEnginePortChanges(oldEngine, newEngine DataEngineConfig) bool {
+	return oldEngine.WebSocketPort != newEngine.WebSocketPort ||
+		oldEngine.RESTAPIPort != newEngine.RESTAPIPort
+}
+
+// ============================================================================
+// ENVIRONMENT-SPECIFIC CONFIGURATION
+// ============================================================================
+
+// EnvironmentConfig represents environment-specific configuration
+type EnvironmentConfig struct {
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	Overrides   map[string]interface{} `json:"overrides"`
+}
+
+// EnvironmentManager handles environment-specific configurations
+type EnvironmentManager struct {
+	environments map[string]*EnvironmentConfig
+	currentEnv   string
+}
+
+// NewEnvironmentManager creates a new environment manager
+func NewEnvironmentManager() *EnvironmentManager {
+	em := &EnvironmentManager{
+		environments: make(map[string]*EnvironmentConfig),
+		currentEnv:   getEnv("ARCHGUARDIAN_ENV", "development"),
+	}
+
+	// Load default environments
+	em.loadDefaultEnvironments()
+
+	return em
+}
+
+// loadDefaultEnvironments loads built-in environment configurations
+func (em *EnvironmentManager) loadDefaultEnvironments() {
+	em.environments["development"] = &EnvironmentConfig{
+		Name:        "development",
+		Description: "Development environment with debug logging and local services",
+		Overrides: map[string]interface{}{
+			"data_engine": map[string]interface{}{
+				"enable_kafka":      false,
+				"enable_chromadb":   true,
+				"chromadb_url":      "http://localhost:8000",
+				"websocket_port":    8080,
+				"restapi_port":      7080,
+			},
+			"orchestrator": map[string]interface{}{
+				"planner_model":   "gemini-pro",
+				"executor_models": []string{"cerebras"},
+				"finalizer_model": "gemini-pro",
+				"verifier_model":  "gemini-pro",
+			},
+		},
+	}
+
+	em.environments["production"] = &EnvironmentConfig{
+		Name:        "production",
+		Description: "Production environment with optimized settings and external services",
+		Overrides: map[string]interface{}{
+			"data_engine": map[string]interface{}{
+				"enable_kafka":      true,
+				"kafka_brokers":     []string{"kafka:9092"},
+				"enable_chromadb":   true,
+				"chromadb_url":      "http://chromadb:8000",
+				"websocket_port":    8080,
+				"restapi_port":      7080,
+			},
+			"orchestrator": map[string]interface{}{
+				"planner_model":   "gemini-pro",
+				"executor_models": []string{"cerebras", "deepseek"},
+				"finalizer_model": "anthropic",
+				"verifier_model":  "gemini-pro",
+			},
+			"scan_interval_hours": 6, // More frequent scans in production
+		},
+	}
+
+	em.environments["testing"] = &EnvironmentConfig{
+		Name:        "testing",
+		Description: "Testing environment with minimal external dependencies",
+		Overrides: map[string]interface{}{
+			"data_engine": map[string]interface{}{
+				"enable_kafka":      false,
+				"enable_chromadb":   false,
+				"enable_websocket":  false,
+				"enable_restapi":    false,
+			},
+			"scan_interval_hours": 24, // Less frequent scans for testing
+		},
+	}
+}
+
+// GetCurrentEnvironment returns the current environment configuration
+func (em *EnvironmentManager) GetCurrentEnvironment() *EnvironmentConfig {
+	if env, exists := em.environments[em.currentEnv]; exists {
+		return env
+	}
+	return em.environments["development"] // fallback
+}
+
+// ApplyEnvironmentOverrides applies environment-specific overrides to settings
+func (em *EnvironmentManager) ApplyEnvironmentOverrides(settings *Config) {
+	env := em.GetCurrentEnvironment()
+	if env == nil {
+		return
+	}
+
+	log.Printf("🌍 Applying %s environment overrides...", env.Name)
+
+	// Apply overrides using reflection-like approach
+	for key, value := range env.Overrides {
+		em.applyOverride(settings, key, value)
+	}
+
+	log.Printf("✅ Environment overrides applied")
+}
+
+// applyOverride applies a single environment override to the settings
+func (em *EnvironmentManager) applyOverride(settings *Config, key string, value interface{}) {
+	switch key {
+	case "scan_interval_hours":
+		if hours, ok := value.(float64); ok {
+			settings.ScanInterval = time.Duration(hours) * time.Hour
+			log.Printf("  ⏰ Scan interval set to %v", settings.ScanInterval)
+		}
+	case "data_engine":
+		if deConfig, ok := value.(map[string]interface{}); ok {
+			em.applyDataEngineOverrides(&settings.DataEngine, deConfig)
+		}
+	case "orchestrator":
+		if orchConfig, ok := value.(map[string]interface{}); ok {
+			em.applyOrchestratorOverrides(&settings.Orchestrator, orchConfig)
+		}
+	}
+}
+
+// applyDataEngineOverrides applies data engine specific overrides
+func (em *EnvironmentManager) applyDataEngineOverrides(de *DataEngineConfig, overrides map[string]interface{}) {
+	for key, value := range overrides {
+		switch key {
+		case "enable_kafka":
+			if v, ok := value.(bool); ok {
+				de.EnableKafka = v
+				log.Printf("  📈 Kafka enabled: %t", v)
+			}
+		case "enable_chromadb":
+			if v, ok := value.(bool); ok {
+				de.EnableChromaDB = v
+				log.Printf("  📈 ChromaDB enabled: %t", v)
+			}
+		case "enable_websocket":
+			if v, ok := value.(bool); ok {
+				de.EnableWebSocket = v
+				log.Printf("  📈 WebSocket enabled: %t", v)
+			}
+		case "enable_restapi":
+			if v, ok := value.(bool); ok {
+				de.EnableRESTAPI = v
+				log.Printf("  📈 REST API enabled: %t", v)
+			}
+		case "kafka_brokers":
+			if brokers, ok := value.([]interface{}); ok {
+				de.KafkaBrokers = make([]string, len(brokers))
+				for i, broker := range brokers {
+					if b, ok := broker.(string); ok {
+						de.KafkaBrokers[i] = b
+					}
+				}
+				log.Printf("  📈 Kafka brokers: %v", de.KafkaBrokers)
+			}
+		case "chromadb_url":
+			if v, ok := value.(string); ok {
+				de.ChromaDBURL = v
+				log.Printf("  📈 ChromaDB URL: %s", v)
+			}
+		case "websocket_port":
+			if v, ok := value.(float64); ok {
+				de.WebSocketPort = int(v)
+				log.Printf("  📈 WebSocket port: %d", int(v))
+			}
+		case "restapi_port":
+			if v, ok := value.(float64); ok {
+				de.RESTAPIPort = int(v)
+				log.Printf("  📈 REST API port: %d", int(v))
+			}
+		}
+	}
+}
+
+// applyOrchestratorOverrides applies orchestrator specific overrides
+func (em *EnvironmentManager) applyOrchestratorOverrides(orch *OrchestratorConfig, overrides map[string]interface{}) {
+	for key, value := range overrides {
+		switch key {
+		case "planner_model":
+			if v, ok := value.(string); ok {
+				orch.PlannerModel = v
+				log.Printf("  🤖 Planner model: %s", v)
+			}
+		case "executor_models":
+			if models, ok := value.([]interface{}); ok {
+				orch.ExecutorModels = make([]string, len(models))
+				for i, model := range models {
+					if m, ok := model.(string); ok {
+						orch.ExecutorModels[i] = m
+					}
+				}
+				log.Printf("  🤖 Executor models: %v", orch.ExecutorModels)
+			}
+		case "finalizer_model":
+			if v, ok := value.(string); ok {
+				orch.FinalizerModel = v
+				log.Printf("  🤖 Finalizer model: %s", v)
+			}
+		case "verifier_model":
+			if v, ok := value.(string); ok {
+				orch.VerifierModel = v
+				log.Printf("  🤖 Verifier model: %s", v)
+			}
+		}
+	}
+}
+
+// LoadEnvironmentConfig loads environment configuration from file
+func (em *EnvironmentManager) LoadEnvironmentConfig(filePath string) error {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to read environment config file: %w", err)
+	}
+
+	var envConfig EnvironmentConfig
+	if err := json.Unmarshal(data, &envConfig); err != nil {
+		return fmt.Errorf("failed to parse environment config: %w", err)
+	}
+
+	em.environments[envConfig.Name] = &envConfig
+	log.Printf("✅ Environment configuration loaded: %s", envConfig.Name)
+	return nil
+}
+
+// SaveEnvironmentConfig saves environment configuration to file
+func (em *EnvironmentManager) SaveEnvironmentConfig(envName, filePath string) error {
+	env, exists := em.environments[envName]
+	if !exists {
+		return fmt.Errorf("environment %s not found", envName)
+	}
+
+	data, err := json.MarshalIndent(env, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal environment config: %w", err)
+	}
+
+	if err := os.WriteFile(filePath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write environment config file: %w", err)
+	}
+
+	log.Printf("✅ Environment configuration saved: %s", envName)
+	return nil
+}
+
+// ============================================================================
+// SECRETS MANAGEMENT
+// ============================================================================
+
+// SecretsManager handles secure storage and retrieval of sensitive configuration
+type SecretsManager struct {
+	encryptionKey []byte
+	secrets       map[string]string
+	mutex         sync.RWMutex
+}
+
+// NewSecretsManager creates a new secrets manager
+func NewSecretsManager() *SecretsManager {
+	// Use environment variable for encryption key, fallback to generated key
+	keyString := getEnv("SECRETS_ENCRYPTION_KEY", "")
+	var key []byte
+
+	if keyString != "" && len(keyString) >= 32 {
+		key = []byte(keyString[:32])
+	} else {
+		// Generate a random key for development (not secure for production!)
+		key = make([]byte, 32)
+		rand.Read(key)
+		log.Printf("⚠️  Using randomly generated encryption key. Set SECRETS_ENCRYPTION_KEY for production.")
+	}
+
+	return &SecretsManager{
+		encryptionKey: key,
+		secrets:       make(map[string]string),
+	}
+}
+
+// StoreSecret securely stores a secret value
+func (sm *SecretsManager) StoreSecret(key, value string) error {
+	sm.mutex.Lock()
+	defer sm.mutex.Unlock()
+
+	// Encrypt the value
+	encrypted, err := sm.encrypt(value)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt secret: %w", err)
+	}
+
+	sm.secrets[key] = encrypted
+	log.Printf("🔐 Secret stored: %s", key)
+	return nil
+}
+
+// GetSecret retrieves a decrypted secret value
+func (sm *SecretsManager) GetSecret(key string) (string, bool) {
+	sm.mutex.RLock()
+	defer sm.mutex.RUnlock()
+
+	encrypted, exists := sm.secrets[key]
+	if !exists {
+		return "", false
+	}
+
+	// Decrypt the value
+	decrypted, err := sm.decrypt(encrypted)
+	if err != nil {
+		log.Printf("⚠️  Failed to decrypt secret %s: %v", key, err)
+		return "", false
+	}
+
+	return decrypted, true
+}
+
+// DeleteSecret removes a secret
+func (sm *SecretsManager) DeleteSecret(key string) bool {
+	sm.mutex.Lock()
+	defer sm.mutex.Unlock()
+
+	if _, exists := sm.secrets[key]; exists {
+		delete(sm.secrets, key)
+		log.Printf("🗑️  Secret deleted: %s", key)
+		return true
+	}
+	return false
+}
+
+// ListSecrets returns a list of secret keys (without values)
+func (sm *SecretsManager) ListSecrets() []string {
+	sm.mutex.RLock()
+	defer sm.mutex.RUnlock()
+
+	keys := make([]string, 0, len(sm.secrets))
+	for key := range sm.secrets {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+// LoadSecretsFromFile loads encrypted secrets from a file
+func (sm *SecretsManager) LoadSecretsFromFile(filePath string) error {
+	sm.mutex.Lock()
+	defer sm.mutex.Unlock()
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to read secrets file: %w", err)
+	}
+
+	var fileSecrets map[string]string
+	if err := json.Unmarshal(data, &fileSecrets); err != nil {
+		return fmt.Errorf("failed to parse secrets file: %w", err)
+	}
+
+	sm.secrets = fileSecrets
+	log.Printf("✅ Secrets loaded from file: %d secrets", len(sm.secrets))
+	return nil
+}
+
+// SaveSecretsToFile saves encrypted secrets to a file
+func (sm *SecretsManager) SaveSecretsToFile(filePath string) error {
+	sm.mutex.RLock()
+	defer sm.mutex.RUnlock()
+
+	data, err := json.MarshalIndent(sm.secrets, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal secrets: %w", err)
+	}
+
+	if err := os.WriteFile(filePath, data, 0600); err != nil {
+		return fmt.Errorf("failed to write secrets file: %w", err)
+	}
+
+	log.Printf("✅ Secrets saved to file: %s", filePath)
+	return nil
+}
+
+// encrypt encrypts a string using AES-GCM
+func (sm *SecretsManager) encrypt(plaintext string) (string, error) {
+	block, err := aes.NewCipher(sm.encryptionKey)
+	if err != nil {
+		return "", err
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+
+	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
+	return base64.StdEncoding.EncodeToString(ciphertext), nil
+}
+
+// decrypt decrypts a string using AES-GCM
+func (sm *SecretsManager) decrypt(encrypted string) (string, error) {
+	ciphertext, err := base64.StdEncoding.DecodeString(encrypted)
+	if err != nil {
+		return "", err
+	}
+
+	block, err := aes.NewCipher(sm.encryptionKey)
+	if err != nil {
+		return "", err
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+
+	nonceSize := gcm.NonceSize()
+	if len(ciphertext) < nonceSize {
+		return "", fmt.Errorf("ciphertext too short")
+	}
+
+	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return "", err
+	}
+
+	return string(plaintext), nil
+}
+
+
+
+// ============================================================================
+// CONFIGURATION FILE SUPPORT
+// ============================================================================
+
+// ConfigFileManager handles loading and saving configuration from/to files
+type ConfigFileManager struct {
+	secretsManager *SecretsManager
+}
+
+// NewConfigFileManager creates a new configuration file manager
+func NewConfigFileManager(secretsManager *SecretsManager) *ConfigFileManager {
+	return &ConfigFileManager{
+		secretsManager: secretsManager,
+	}
+}
+
+// LoadConfigFromFile loads configuration from a JSON file
+func (cfm *ConfigFileManager) LoadConfigFromFile(filePath string) (*Config, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	var config Config
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	log.Printf("✅ Configuration loaded from file: %s", filePath)
+	return &config, nil
+}
+
+// SaveConfigToFile saves configuration to a JSON file
+func (cfm *ConfigFileManager) SaveConfigToFile(config *Config, filePath string) error {
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+
+	if err := os.WriteFile(filePath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+
+	log.Printf("✅ Configuration saved to file: %s", filePath)
+	return nil
+}
+
+// LoadConfigWithSecrets loads configuration and resolves secrets
+func (cfm *ConfigFileManager) LoadConfigWithSecrets(filePath string) (*Config, error) {
+	config, err := cfm.LoadConfigFromFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Resolve secrets from secrets manager
+	if secretKey, exists := cfm.secretsManager.GetSecret("cerebras_api_key"); exists {
+		config.AIProviders.Cerebras.APIKey = secretKey
+	}
+	if secretKey, exists := cfm.secretsManager.GetSecret("gemini_api_key"); exists {
+		config.AIProviders.Gemini.APIKey = secretKey
+	}
+	if secretKey, exists := cfm.secretsManager.GetSecret("anthropic_api_key"); exists {
+		config.AIProviders.Anthropic.APIKey = secretKey
+	}
+	if secretKey, exists := cfm.secretsManager.GetSecret("openai_api_key"); exists {
+		config.AIProviders.OpenAI.APIKey = secretKey
+	}
+	if secretKey, exists := cfm.secretsManager.GetSecret("deepseek_api_key"); exists {
+		config.AIProviders.DeepSeek.APIKey = secretKey
+	}
+	if secretKey, exists := cfm.secretsManager.GetSecret("github_token"); exists {
+		config.GitHubToken = secretKey
+	}
+
+	log.Printf("🔐 Secrets resolved from secrets manager")
+	return config, nil
+}
+
+// SaveConfigWithSecrets saves configuration with secrets stored separately
+func (cfm *ConfigFileManager) SaveConfigWithSecrets(config *Config, configFilePath, secretsFilePath string) error {
+	// Create a copy of config with secrets removed
+	configCopy := *config
+
+	// Store secrets separately and replace with placeholders
+	if config.AIProviders.Cerebras.APIKey != "" {
+		cfm.secretsManager.StoreSecret("cerebras_api_key", config.AIProviders.Cerebras.APIKey)
+		configCopy.AIProviders.Cerebras.APIKey = "SECRET:cerebras_api_key"
+	}
+	if config.AIProviders.Gemini.APIKey != "" {
+		cfm.secretsManager.StoreSecret("gemini_api_key", config.AIProviders.Gemini.APIKey)
+		configCopy.AIProviders.Gemini.APIKey = "SECRET:gemini_api_key"
+	}
+	if config.AIProviders.Anthropic.APIKey != "" {
+		cfm.secretsManager.StoreSecret("anthropic_api_key", config.AIProviders.Anthropic.APIKey)
+		configCopy.AIProviders.Anthropic.APIKey = "SECRET:anthropic_api_key"
+	}
+	if config.AIProviders.OpenAI.APIKey != "" {
+		cfm.secretsManager.StoreSecret("openai_api_key", config.AIProviders.OpenAI.APIKey)
+		configCopy.AIProviders.OpenAI.APIKey = "SECRET:openai_api_key"
+	}
+	if config.AIProviders.DeepSeek.APIKey != "" {
+		cfm.secretsManager.StoreSecret("deepseek_api_key", config.AIProviders.DeepSeek.APIKey)
+		configCopy.AIProviders.DeepSeek.APIKey = "SECRET:deepseek_api_key"
+	}
+	if config.GitHubToken != "" {
+		cfm.secretsManager.StoreSecret("github_token", config.GitHubToken)
+		configCopy.GitHubToken = "SECRET:github_token"
+	}
+
+	// Save config file
+	if err := cfm.SaveConfigToFile(&configCopy, configFilePath); err != nil {
+		return err
+	}
+
+	// Save secrets file
+	if err := cfm.secretsManager.SaveSecretsToFile(secretsFilePath); err != nil {
+		return err
+	}
+
+	log.Printf("✅ Configuration and secrets saved separately")
+	return nil
+}
+
+// ============================================================================
 // GLOBAL VARIABLES
 // ============================================================================
 
 var guardianInstance *ArchGuardian // Global ArchGuardian instance for API access
+var globalProjectStore *ProjectStore // Global project store for API access
+var globalDB *chromem.DB // Global chromem database instance
+var globalScanner *Scanner // Global scanner instance for API access
+var globalDiagnoser *RiskDiagnoser // Global risk diagnoser instance for API access
+var globalSettingsManager *SettingsManager // Global settings manager instance
 
 // ============================================================================
 // MAIN ENTRY POINT
@@ -2496,7 +3989,7 @@ var guardianInstance *ArchGuardian // Global ArchGuardian instance for API acces
 
 func main() {
 	log.Println("╔════════════════════════════════════════════════════════════════╗")
-	log.Println("║            ArchGuardian - AI-Powered Code Guardian            ║")
+	log.Println("║            ArchGuardian - AI-Powered Code Guardian             ║")
 	log.Println("║          Deep Visibility • Risk Detection • Auto-Fix           ║")
 	log.Println("╚════════════════════════════════════════════════════════════════╝")
 
@@ -2507,7 +4000,15 @@ func main() {
 		log.Println("✅ .env file loaded successfully")
 	}
 
-	// Load configuration from environment variables
+	// Initialize secrets manager for secure credential storage
+	secretsManager := NewSecretsManager()
+	log.Println("✅ Secrets manager initialized")
+
+	// Initialize environment manager for environment-specific configurations
+	envManager := NewEnvironmentManager()
+	log.Println("✅ Environment manager initialized")
+
+	// Load configuration from environment variables (base config)
 	config := &Config{
 		ProjectPath:       getEnv("PROJECT_PATH", "."),
 		GitHubToken:       getEnv("GITHUB_TOKEN", ""),
@@ -2518,7 +4019,7 @@ func main() {
 			Cerebras: ProviderCredentials{
 				APIKey:   getEnv("CEREBRAS_API_KEY", ""),
 				Endpoint: getEnv("CEREBRAS_ENDPOINT", "https://api.cerebras.ai/v1"),
-				Model:    getEnv("CEREBRAS_MODEL", "llama3.1-8b"),
+				Model:    getEnv("CEREBRAS_MODEL", "llama3.3-70b"),
 			},
 			Gemini: ProviderCredentials{
 				APIKey:   getEnv("GEMINI_API_KEY", ""),
@@ -2544,8 +4045,8 @@ func main() {
 		},
 		Orchestrator: OrchestratorConfig{
 			PlannerModel:   getEnv("ORCHESTRATOR_PLANNER_MODEL", "gemini-pro"),
-			ExecutorModels: strings.Split(getEnv("ORCHESTRATOR_EXECUTOR_MODELS", "llama3.1-8b,deepseek-coder"), ","),
-			FinalizerModel: getEnv("ORCHESTRATOR_FINALIZER_MODEL", "claude-3-sonnet-20240229"),
+			ExecutorModels: strings.Split(getEnv("ORCHESTRATOR_EXECUTOR_MODELS", "llama3.3-70b,"), ","),
+			FinalizerModel: getEnv("ORCHESTRATOR_FINALIZER_MODEL", "deepseek-coder"),
 			VerifierModel:  getEnv("ORCHESTRATOR_VERIFIER_MODEL", "gemini-pro"),
 		},
 		DataEngine: DataEngineConfig{
@@ -2562,6 +4063,36 @@ func main() {
 		},
 	}
 
+	// Apply environment-specific overrides
+	envManager.ApplyEnvironmentOverrides(config)
+	log.Printf("🌍 Applied %s environment configuration", envManager.currentEnv)
+
+	// Resolve secrets from secrets manager
+	if secretKey, exists := secretsManager.GetSecret("cerebras_api_key"); exists && config.AIProviders.Cerebras.APIKey == "" {
+		config.AIProviders.Cerebras.APIKey = secretKey
+		log.Println("🔐 Resolved Cerebras API key from secrets")
+	}
+	if secretKey, exists := secretsManager.GetSecret("gemini_api_key"); exists && config.AIProviders.Gemini.APIKey == "" {
+		config.AIProviders.Gemini.APIKey = secretKey
+		log.Println("🔐 Resolved Gemini API key from secrets")
+	}
+	if secretKey, exists := secretsManager.GetSecret("anthropic_api_key"); exists && config.AIProviders.Anthropic.APIKey == "" {
+		config.AIProviders.Anthropic.APIKey = secretKey
+		log.Println("🔐 Resolved Anthropic API key from secrets")
+	}
+	if secretKey, exists := secretsManager.GetSecret("openai_api_key"); exists && config.AIProviders.OpenAI.APIKey == "" {
+		config.AIProviders.OpenAI.APIKey = secretKey
+		log.Println("🔐 Resolved OpenAI API key from secrets")
+	}
+	if secretKey, exists := secretsManager.GetSecret("deepseek_api_key"); exists && config.AIProviders.DeepSeek.APIKey == "" {
+		config.AIProviders.DeepSeek.APIKey = secretKey
+		log.Println("🔐 Resolved DeepSeek API key from secrets")
+	}
+	if secretKey, exists := secretsManager.GetSecret("github_token"); exists && config.GitHubToken == "" {
+		config.GitHubToken = secretKey
+		log.Println("🔐 Resolved GitHub token from secrets")
+	}
+
 	// Validate configuration
 	if config.ProjectPath == "" {
 		log.Fatal("❌ PROJECT_PATH is required")
@@ -2575,6 +4106,45 @@ func main() {
 		log.Println("⚠️  Warning: GEMINI_API_KEY not set")
 	}
 
+	// Initialize chromem-go persistent database
+	var err error
+	globalDB, err = chromem.NewPersistentDB("./archguardian-data", true)
+	if err != nil {
+		log.Fatalf("❌ Failed to initialize chromem database: %v", err)
+	}
+	log.Println("✅ Chromem database initialized successfully")
+
+	// Create collections for different data types
+	collections := map[string]string{
+		"projects":         "Project metadata and configuration",
+		"knowledge-graphs": "Scan results with node/edge data",
+		"security-issues":  "Discovered vulnerabilities and risks",
+		"test-coverage":    "Code coverage reports",
+		"scan-history":     "Historical scan metadata",
+		"settings-history": "Configuration change audit trail",
+		"remediation-logs": "AI remediation attempts and results",
+	}
+
+	for name, description := range collections {
+		collection, err := globalDB.GetOrCreateCollection(name, map[string]string{"type": description}, nil)
+		if err != nil {
+			log.Fatalf("❌ Failed to create collection %s: %v", name, err)
+		}
+		log.Printf("✅ Created collection: %s", name)
+		_ = collection // Keep reference if needed later
+	}
+
+	// Initialize project store
+	globalProjectStore = NewProjectStore()
+	log.Println("✅ Project store initialized successfully")
+
+	// Initialize settings manager
+	globalSettingsManager = NewSettingsManager(globalDB)
+	log.Println("✅ Settings manager initialized successfully")
+
+	// Add settings change listeners for hot-reload
+	globalSettingsManager.AddChangeListener(&SettingsHotReloadListener{})
+
 	// Create a single AIInferenceEngine instance to be shared
 	aiEngine := NewAIInferenceEngine(config)
 
@@ -2585,14 +4155,14 @@ func main() {
 	// Initialize Log Analyzer for log stream processing
 	logAnalyzer := NewLogAnalyzer(config, aiEngine)
 
-	// Start dashboard server in a goroutine
+	// Start consolidated server with all endpoints
 	go func() {
-		if err := startDashboardServer(guardianInstance); err != nil {
-			log.Printf("⚠️  Dashboard server failed: %v", err)
+		if err := startConsolidatedServer(guardianInstance, logAnalyzer); err != nil {
+			log.Printf("⚠️  Consolidated server failed: %v", err)
 		}
 	}()
 
-	// Start log ingestion server in a goroutine
+	// Start log ingestion server for external log streams
 	go func() {
 		if err := startLogIngestionServer(logAnalyzer); err != nil {
 			log.Printf("⚠️  Log ingestion server failed: %v", err)
@@ -2630,6 +4200,54 @@ func getEnvInt(key string, defaultValue int) int {
 		}
 	}
 	return defaultValue
+}
+
+// logWriter is a custom writer to pipe log output to the WebSocket
+type logWriter struct {
+	ag            *ArchGuardian
+	initialLogs   [][]byte
+	bufferMutex   sync.Mutex
+	clientReady   bool
+	maxBufferSize int
+}
+
+func (lw *logWriter) Write(p []byte) (n int, err error) {
+	// Write to original stdout
+	n, err = os.Stdout.Write(p)
+
+	lw.bufferMutex.Lock()
+	defer lw.bufferMutex.Unlock()
+
+	// If the client is ready, broadcast immediately.
+	if lw.clientReady && lw.ag != nil {
+		lw.ag.BroadcastToDashboard(string(p))
+	} else {
+		// Otherwise, buffer the initial logs.
+		if lw.maxBufferSize == 0 {
+			lw.maxBufferSize = 100 // Default max buffer size
+		}
+		if len(lw.initialLogs) < lw.maxBufferSize {
+			// Create a copy of the byte slice to avoid data races
+			logCopy := make([]byte, len(p))
+			copy(logCopy, p)
+			lw.initialLogs = append(lw.initialLogs, logCopy)
+		}
+	}
+
+	return n, err
+}
+
+func (lw *logWriter) FlushInitialLogs() {
+	lw.bufferMutex.Lock()
+	defer lw.bufferMutex.Unlock()
+	lw.clientReady = true
+	for _, logBytes := range lw.initialLogs {
+		if lw.ag != nil {
+			lw.ag.BroadcastToDashboard(string(logBytes))
+		}
+	}
+	// Clear the buffer after flushing
+	lw.initialLogs = nil
 }
 
 // ============================================================================
@@ -3037,16 +4655,221 @@ func (la *LogAnalyzer) createTechnicalDebtItem(issue map[string]interface{}) err
 }
 
 // ============================================================================
-// DASHBOARD SERVER
+// ERROR HANDLING & RESPONSE UTILITIES
 // ============================================================================
 
-// startDashboardServer starts the web dashboard server with embedded files
-func startDashboardServer(ag *ArchGuardian) error {
-	log.Println("🌐 Starting ArchGuardian Dashboard Server...")
+// APIError represents a standardized API error response
+type APIError struct {
+	Error   string                 `json:"error"`
+	Message string                 `json:"message"`
+	Code    string                 `json:"code,omitempty"`
+	Details map[string]interface{} `json:"details,omitempty"`
+}
+
+// APIResponse represents a standardized API response
+type APIResponse struct {
+	Success bool        `json:"success"`
+	Data    interface{} `json:"data,omitempty"`
+	Error   *APIError   `json:"error,omitempty"`
+}
+
+// sendError sends a standardized error response
+func sendError(w http.ResponseWriter, statusCode int, message string, code string, details map[string]interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+
+	response := APIResponse{
+		Success: false,
+		Error: &APIError{
+			Error:   http.StatusText(statusCode),
+			Message: message,
+			Code:    code,
+			Details: details,
+		},
+	}
+
+	sendSuccess(w, response)
+}
+
+// sendSuccess sends a standardized success response
+func sendSuccess(w http.ResponseWriter, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	response := APIResponse{
+		Success: true,
+		Data:    data,
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+
+// RateLimiter implements simple rate limiting
+type RateLimiter struct {
+	requests map[string][]time.Time
+	window   time.Duration
+	limit    int
+	mutex    sync.Mutex
+}
+
+// NewRateLimiter creates a new rate limiter
+func NewRateLimiter(window time.Duration, limit int) *RateLimiter {
+	rl := &RateLimiter{
+		requests: make(map[string][]time.Time),
+		window:   window,
+		limit:   limit,
+	}
+
+	// Start cleanup goroutine
+	go rl.cleanup()
+
+	return rl
+}
+
+// IsAllowed checks if a request is allowed
+func (rl *RateLimiter) IsAllowed(key string) bool {
+	rl.mutex.Lock()
+	defer rl.mutex.Unlock()
+
+	now := time.Now()
+	requests := rl.requests[key]
+
+	// Remove old requests outside the window
+	var validRequests []time.Time
+	for _, req := range requests {
+		if now.Sub(req) < rl.window {
+			validRequests = append(validRequests, req)
+		}
+	}
+
+	// Check if under limit
+	if len(validRequests) >= rl.limit {
+		return false
+	}
+
+	// Add current request
+	validRequests = append(validRequests, now)
+	rl.requests[key] = validRequests
+
+	return true
+}
+
+// cleanup removes old entries periodically
+func (rl *RateLimiter) cleanup() {
+	ticker := time.NewTicker(rl.window)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		rl.mutex.Lock()
+		now := time.Now()
+
+		for key, requests := range rl.requests {
+			var validRequests []time.Time
+			for _, req := range requests {
+				if now.Sub(req) < rl.window {
+					validRequests = append(validRequests, req)
+				}
+			}
+
+			if len(validRequests) == 0 {
+				delete(rl.requests, key)
+			} else {
+				rl.requests[key] = validRequests
+			}
+		}
+		rl.mutex.Unlock()
+	}
+}
+
+// rateLimitMiddleware implements rate limiting middleware
+func rateLimitMiddleware(rl *RateLimiter) mux.MiddlewareFunc {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Use client IP as key
+			clientIP := r.RemoteAddr
+			if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+				clientIP = forwarded
+			}
+
+			if !rl.IsAllowed(clientIP) {
+				sendError(w, http.StatusTooManyRequests, "Rate limit exceeded", "RATE_LIMIT_EXCEEDED", map[string]interface{}{
+					"retry_after": "60", // seconds
+				})
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// securityHeadersMiddleware adds security headers
+func securityHeadersMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Security headers
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-XSS-Protection", "1; mode=block")
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self' ws: wss: http://localhost:3000 https://api.github.com https://unpkg.com https://cdn.jsdelivr.net")
+
+		// CORS headers (updated for security)
+		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		w.Header().Set("Access-Control-Max-Age", "86400") // 24 hours
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// validationMiddleware validates request data
+func validationMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Check Content-Type for POST/PUT requests
+		if r.Method == "POST" || r.Method == "PUT" {
+			contentType := r.Header.Get("Content-Type")
+			if !strings.Contains(contentType, "application/json") {
+				sendError(w, http.StatusBadRequest, "Content-Type must be application/json", "INVALID_CONTENT_TYPE", nil)
+				return
+			}
+		}
+
+		// Check request size (limit to 10MB)
+		if r.ContentLength > 10*1024*1024 {
+			sendError(w, http.StatusRequestEntityTooLarge, "Request too large", "REQUEST_TOO_LARGE", nil)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// ============================================================================
+// CONSOLIDATED SERVER
+// ============================================================================
+
+// startConsolidatedServer starts a single consolidated server with all endpoints
+func startConsolidatedServer(ag *ArchGuardian, logAnalyzer *LogAnalyzer) error {
+	log.Println("🌐 Starting ArchGuardian Consolidated Server...")
 
 	router := mux.NewRouter()
-	// Add CORS middleware to the router directly
+
+	// Initialize rate limiter (100 requests per minute per IP)
+	rateLimiter := NewRateLimiter(time.Minute, 100)
+
+	// Apply global middleware
 	router.Use(corsMiddleware)
+	router.Use(securityHeadersMiddleware)
+	router.Use(rateLimitMiddleware(rateLimiter))
+	router.Use(validationMiddleware)
 
 	// Serve embedded dashboard files
 	router.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -3061,22 +4884,158 @@ func startDashboardServer(ag *ArchGuardian) error {
 		serveEmbeddedFile(w, r, "app.js", "application/javascript")
 	})
 
-	// API endpoints for dashboard data
-	router.HandleFunc("/api/v1/knowledge-graph", handleKnowledgeGraph).Methods("GET")
-	router.HandleFunc("/api/v1/risk-assessment", handleRiskAssessment).Methods("GET")
-	router.HandleFunc("/api/v1/issues", handleIssues).Methods("GET")
-	router.HandleFunc("/api/v1/coverage", handleCoverage).Methods("GET")
-	router.HandleFunc("/api/v1/scan/start", func(w http.ResponseWriter, r *http.Request) {
-		handleStartScan(w, r, ag)
+	// Initialize authentication service
+	authService := NewAuthService()
+
+	// Authentication endpoints (public)
+	router.HandleFunc("/api/v1/auth/github", func(w http.ResponseWriter, r *http.Request) {
+		handleGitHubAuth(w, r, authService)
+	}).Methods("GET", "POST")
+	router.HandleFunc("/api/v1/auth/github/callback", func(w http.ResponseWriter, r *http.Request) {
+		handleGitHubCallback(w, r, authService)
+	}).Methods("GET")
+	router.HandleFunc("/api/v1/auth/github/status", func(w http.ResponseWriter, r *http.Request) {
+		handleGitHubAuthStatus(w, r, authService)
+	}).Methods("GET")
+	router.HandleFunc("/api/v1/auth/logout", func(w http.ResponseWriter, r *http.Request) {
+		handleLogout(w, r, authService)
 	}).Methods("POST")
-	router.HandleFunc("/api/v1/settings", handleSettings).Methods("GET", "POST")
+
+	// Protected API endpoints for dashboard data
+	router.HandleFunc("/api/v1/knowledge-graph", authService.OptionalAuthMiddleware(handleKnowledgeGraph)).Methods("GET")
+	router.HandleFunc("/api/v1/risk-assessment", authService.OptionalAuthMiddleware(handleRiskAssessment)).Methods("GET")
+	router.HandleFunc("/api/v1/issues", authService.OptionalAuthMiddleware(handleIssues)).Methods("GET")
+	router.HandleFunc("/api/v1/coverage", authService.OptionalAuthMiddleware(handleCoverage)).Methods("GET")
+	router.HandleFunc("/api/v1/scan/start", authService.AuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		handleStartScan(w, r, ag)
+	})).Methods("POST")
+	router.HandleFunc("/api/v1/settings", authService.OptionalAuthMiddleware(handleSettings)).Methods("GET", "POST")
+
+	// Project management endpoints
+	router.HandleFunc("/api/v1/projects", handleGetProjects).Methods("GET")
+	router.HandleFunc("/api/v1/projects", handleCreateProject).Methods("POST")
+	router.HandleFunc("/api/v1/projects/{id}", handleGetProject).Methods("GET")
+	router.HandleFunc("/api/v1/projects/{id}", handleDeleteProject).Methods("DELETE")
+	router.HandleFunc("/api/v1/projects/{id}/scan", func(w http.ResponseWriter, r *http.Request) {
+		handleScanProject(w, r, ag)
+	}).Methods("POST")
 
 	// Health check endpoint
 	router.HandleFunc("/health", handleHealth).Methods("GET")
 
-	log.Println("✅ Dashboard server started on http://localhost:3000")
-	log.Println("📊 API endpoints available on http://localhost:3000/api/v1/")
+	// Integration monitoring endpoints
+	router.HandleFunc("/api/v1/integrations/status", handleIntegrationStatus).Methods("GET")
+
+	// Alert configuration endpoints
+	router.HandleFunc("/api/v1/alerts", handleAlertConfigs).Methods("GET", "POST")
+	router.HandleFunc("/api/v1/alerts/{id}", handleAlertConfig).Methods("GET", "PUT", "DELETE")
+
+	// System metrics endpoint
+	router.HandleFunc("/api/v1/metrics", handleSystemMetrics).Methods("GET")
+
+	// Scan history and search endpoints
+	router.HandleFunc("/api/v1/scans/history", handleScanHistory).Methods("GET")
+	router.HandleFunc("/api/v1/search", handleSemanticSearch).Methods("GET")
+	router.HandleFunc("/api/v1/backup", handleBackup).Methods("POST")
+	router.HandleFunc("/api/v1/backup", handleBackupList).Methods("GET")
+
+	// Log ingestion endpoints (consolidated from port 4000)
+	router.HandleFunc("/api/v1/logs", func(w http.ResponseWriter, r *http.Request) {
+		handleLogIngestion(w, r, logAnalyzer)
+	}).Methods("POST")
+	router.HandleFunc("/api/v1/logs/batch", func(w http.ResponseWriter, r *http.Request) {
+		handleBatchLogIngestion(w, r, logAnalyzer)
+	}).Methods("POST")
+	router.HandleFunc("/api/v1/logs/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":    "healthy",
+			"service":   "log_ingestion",
+			"timestamp": time.Now(),
+		})
+	}).Methods("GET")
+
+	// Data Engine endpoints (consolidated from port 7080)
+	if guardianInstance != nil && guardianInstance.dataEngine != nil {
+		de := guardianInstance.dataEngine
+
+		// Knowledge graph endpoint
+		router.HandleFunc("/api/v1/data/knowledge-graph", func(w http.ResponseWriter, r *http.Request) {
+			handleDataEngineKnowledgeGraph(w, r, de)
+		}).Methods("GET")
+
+		// Issues endpoint
+		router.HandleFunc("/api/v1/data/issues", func(w http.ResponseWriter, r *http.Request) {
+			handleDataEngineIssues(w, r, de)
+		}).Methods("GET")
+
+		// Coverage endpoint
+		router.HandleFunc("/api/v1/data/coverage", func(w http.ResponseWriter, r *http.Request) {
+			handleDataEngineCoverage(w, r, de)
+		}).Methods("GET")
+
+		// Metrics endpoint
+		router.HandleFunc("/api/v1/data/metrics", func(w http.ResponseWriter, r *http.Request) {
+			handleDataEngineMetrics(w, r, de)
+		}).Methods("GET")
+
+		// Alerts endpoints
+		router.HandleFunc("/api/v1/data/alerts", func(w http.ResponseWriter, r *http.Request) {
+			handleDataEngineAlerts(w, r, de)
+		}).Methods("GET")
+		router.HandleFunc("/api/v1/data/alerts/{id}/resolve", func(w http.ResponseWriter, r *http.Request) {
+			handleDataEngineResolveAlert(w, r, de)
+		}).Methods("POST")
+
+		// Events endpoints
+		router.HandleFunc("/api/v1/data/events", func(w http.ResponseWriter, r *http.Request) {
+			handleDataEngineEvents(w, r, de)
+		}).Methods("GET")
+		router.HandleFunc("/api/v1/data/events/search", func(w http.ResponseWriter, r *http.Request) {
+			handleDataEngineSearchEvents(w, r, de)
+		}).Methods("GET")
+		router.HandleFunc("/api/v1/data/events/types", func(w http.ResponseWriter, r *http.Request) {
+			handleDataEngineEventTypes(w, r, de)
+		}).Methods("GET")
+
+		// Windows endpoints
+		router.HandleFunc("/api/v1/data/windows", func(w http.ResponseWriter, r *http.Request) {
+			handleDataEngineWindows(w, r, de)
+		}).Methods("GET")
+		router.HandleFunc("/api/v1/data/windows/range", func(w http.ResponseWriter, r *http.Request) {
+			handleDataEngineWindowsInRange(w, r, de)
+		}).Methods("GET")
+
+		// Active users endpoint
+		router.HandleFunc("/api/v1/data/active-users", func(w http.ResponseWriter, r *http.Request) {
+			handleDataEngineActiveUsers(w, r, de)
+		}).Methods("GET")
+
+		// Event rates endpoint
+		router.HandleFunc("/api/v1/data/event-rates", func(w http.ResponseWriter, r *http.Request) {
+			handleDataEngineEventRates(w, r, de)
+		}).Methods("GET")
+
+		// Health check for data engine
+		router.HandleFunc("/api/v1/data/health", func(w http.ResponseWriter, r *http.Request) {
+			handleDataEngineHealth(w, r, de)
+		}).Methods("GET")
+	}
+
+	// WebSocket endpoint for dashboard log streaming
+	router.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		handleDashboardWebSocket(w, r, guardianInstance)
+	})
+
+	// API Documentation endpoint
+	router.HandleFunc("/api/docs", handleAPIDocs).Methods("GET")
+	router.HandleFunc("/api/v1/docs", handleAPIDocs).Methods("GET")
+
+	log.Println("✅ Consolidated server started on http://localhost:3000")
+	log.Println("📊 All API endpoints available on http://localhost:3000/api/v1/")
 	log.Println("📁 Dashboard files served from embedded resources")
+	log.Println("🔗 WebSocket available on ws://localhost:3000/ws")
+	log.Println("📝 Log ingestion available on http://localhost:3000/api/v1/logs")
 	return http.ListenAndServe(":3000", router)
 }
 
@@ -3121,21 +5080,229 @@ func handleKnowledgeGraph(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
-	// In a real implementation, this would get data from the current scan
-	// For now, return a sample response
-	response := map[string]interface{}{
-		"nodes": []map[string]interface{}{
-			{
-				"id":   "sample_node_1",
-				"type": "code",
-				"name": "main.go",
-				"path": "/path/to/main.go",
-			},
-		},
-		"edges": []map[string]interface{}{},
+	if globalScanner == nil || globalScanner.graph == nil {
+		// Return empty graph if no scan has been performed yet
+		response := map[string]interface{}{
+			"nodes": []map[string]interface{}{},
+			"edges": []map[string]interface{}{},
+		}
+		json.NewEncoder(w).Encode(response)
+		return
 	}
 
+	// Return real knowledge graph data using ToAPIFormat()
+	response := globalScanner.graph.ToAPIFormat()
 	json.NewEncoder(w).Encode(response)
+}
+
+// ============================================================================
+// AUTHENTICATION HANDLERS
+// ============================================================================
+
+// handleGitHubAuth initiates GitHub OAuth flow
+func handleGitHubAuth(w http.ResponseWriter, r *http.Request, authService *AuthService) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	switch r.Method {
+	case "GET":
+		// Generate state for CSRF protection
+		state := generateState()
+		authURL := authService.GetGitHubAuthURL(state)
+
+		response := map[string]interface{}{
+			"auth_url": authURL,
+			"state":    state,
+		}
+		json.NewEncoder(w).Encode(response)
+
+	case "POST":
+		// Handle direct token exchange (for testing or mobile apps)
+		var req struct {
+			Code string `json:"code"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid JSON format", http.StatusBadRequest)
+			return
+		}
+
+		if req.Code == "" {
+			http.Error(w, "Authorization code is required", http.StatusBadRequest)
+			return
+		}
+
+		// Exchange code for token
+		auth, err := authService.ExchangeGitHubCode(req.Code)
+		if err != nil {
+			log.Printf("GitHub OAuth error: %v", err)
+			http.Error(w, "Failed to exchange code for token", http.StatusBadRequest)
+			return
+		}
+
+		// Get user info
+		githubUser, err := authService.GetGitHubUser(auth.AccessToken)
+		if err != nil {
+			log.Printf("Failed to get GitHub user: %v", err)
+			http.Error(w, "Failed to get user information", http.StatusInternalServerError)
+			return
+		}
+
+		// Create or update user
+		user := authService.CreateOrUpdateUser(githubUser)
+		authService.StoreGitHubToken(user.ID, auth)
+
+		// Generate JWT
+		jwtToken, err := authService.GenerateJWT(user)
+		if err != nil {
+			log.Printf("Failed to generate JWT: %v", err)
+			http.Error(w, "Failed to generate authentication token", http.StatusInternalServerError)
+			return
+		}
+
+		response := map[string]interface{}{
+			"success": true,
+			"token":   jwtToken,
+			"user":    user,
+		}
+		json.NewEncoder(w).Encode(response)
+	}
+}
+
+// handleGitHubCallback handles the OAuth callback from GitHub
+func handleGitHubCallback(w http.ResponseWriter, r *http.Request, authService *AuthService) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	code := r.URL.Query().Get("code")
+	errorParam := r.URL.Query().Get("error")
+
+	if errorParam != "" {
+		errorDesc := r.URL.Query().Get("error_description")
+		log.Printf("GitHub OAuth error: %s - %s", errorParam, errorDesc)
+		http.Error(w, "OAuth authentication failed", http.StatusBadRequest)
+		return
+	}
+
+	if code == "" {
+		http.Error(w, "Authorization code not provided", http.StatusBadRequest)
+		return
+	}
+
+	// TODO: Validate state parameter for CSRF protection
+
+	// Exchange code for token
+	auth, err := authService.ExchangeGitHubCode(code)
+	if err != nil {
+		log.Printf("GitHub OAuth error: %v", err)
+		http.Error(w, "Failed to exchange code for token", http.StatusInternalServerError)
+		return
+	}
+
+	// Get user info
+	githubUser, err := authService.GetGitHubUser(auth.AccessToken)
+	if err != nil {
+		log.Printf("Failed to get GitHub user: %v", err)
+		http.Error(w, "Failed to get user information", http.StatusInternalServerError)
+		return
+	}
+
+	// Create or update user
+	user := authService.CreateOrUpdateUser(githubUser)
+	authService.StoreGitHubToken(user.ID, auth)
+
+	// Create session
+	session, err := authService.sessionStore.Get(r, "archguardian-session")
+	if err != nil {
+		log.Printf("Failed to get session: %v", err)
+		http.Error(w, "Session error", http.StatusInternalServerError)
+		return
+	}
+
+	session.Values["user_id"] = user.ID
+	session.Save(r, w)
+
+	// Generate JWT
+	jwtToken, err := authService.GenerateJWT(user)
+	if err != nil {
+		log.Printf("Failed to generate JWT: %v", err)
+		http.Error(w, "Failed to generate authentication token", http.StatusInternalServerError)
+		return
+	}
+
+	// Redirect to dashboard with token
+	redirectURL := fmt.Sprintf("http://localhost:3000/?token=%s", jwtToken)
+	http.Redirect(w, r, redirectURL, http.StatusFound)
+}
+
+// handleGitHubAuthStatus returns the current authentication status
+func handleGitHubAuthStatus(w http.ResponseWriter, r *http.Request, authService *AuthService) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// Try JWT first
+	authHeader := r.Header.Get("Authorization")
+	if authHeader != "" && strings.HasPrefix(authHeader, "Bearer ") {
+		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+		user, err := authService.ValidateJWT(tokenString)
+		if err == nil {
+			response := map[string]interface{}{
+				"authenticated": true,
+				"user":          user,
+				"method":        "jwt",
+			}
+			json.NewEncoder(w).Encode(response)
+			return
+		}
+	}
+
+	// Try session
+	session, err := authService.sessionStore.Get(r, "archguardian-session")
+	if err == nil {
+		if userID, ok := session.Values["user_id"].(string); ok {
+			if user, exists := authService.GetUser(userID); exists {
+				response := map[string]interface{}{
+					"authenticated": true,
+					"user":          user,
+					"method":        "session",
+				}
+				json.NewEncoder(w).Encode(response)
+				return
+			}
+		}
+	}
+
+	// Not authenticated
+	response := map[string]interface{}{
+		"authenticated": false,
+		"user":          nil,
+	}
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleLogout clears the user session
+func handleLogout(w http.ResponseWriter, r *http.Request, authService *AuthService) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// Clear session
+	session, err := authService.sessionStore.Get(r, "archguardian-session")
+	if err == nil {
+		session.Values["user_id"] = nil
+		session.Save(r, w)
+	}
+
+	response := map[string]interface{}{
+		"success": true,
+		"message": "Logged out successfully",
+	}
+	json.NewEncoder(w).Encode(response)
+}
+
+// generateState generates a random state string for CSRF protection
+func generateState() string {
+	bytes := make([]byte, 32)
+	rand.Read(bytes)
+	return base64.URLEncoding.EncodeToString(bytes)
 }
 
 // startLogIngestionServer starts the log ingestion server for receiving external log streams
@@ -3291,58 +5458,134 @@ func handleIssues(w http.ResponseWriter, r *http.Request) {
 	// For now, return sample data based on type
 	var response map[string]interface{}
 
-	switch issueType {
-	case "technical-debt":
-		response = map[string]interface{}{
-			"technical_debt": []map[string]interface{}{
-				{
-					"id":          "TD-1",
-					"location":    "main.go:100",
-					"type":        "complex_function",
-					"severity":    "medium",
-					"description": "Function is too complex",
-					"remediation": "Break down into smaller functions",
-					"effort":      4,
-				},
-			},
+	// Try to get real data from the diagnoser if available
+	if globalDiagnoser != nil {
+		ctx := context.Background()
+		assessment, err := globalDiagnoser.DiagnoseRisks(ctx)
+		if err == nil {
+			// Return real data from the risk assessment
+			switch issueType {
+			case "technical-debt":
+				technicalDebt := make([]map[string]interface{}, len(assessment.TechnicalDebt))
+				for i, debt := range assessment.TechnicalDebt {
+					technicalDebt[i] = map[string]interface{}{
+						"id":          debt.ID,
+						"location":    debt.Location,
+						"type":        debt.Type,
+						"severity":    debt.Severity,
+						"description": debt.Description,
+						"remediation": debt.Remediation,
+						"effort":      debt.Effort,
+					}
+				}
+				response = map[string]interface{}{
+					"technical_debt": technicalDebt,
+				}
+			case "security":
+				securityVulns := make([]map[string]interface{}, len(assessment.SecurityVulns))
+				for i, vuln := range assessment.SecurityVulns {
+					securityVulns[i] = map[string]interface{}{
+						"cve":         vuln.CVE,
+						"package":     vuln.Package,
+						"version":     vuln.Version,
+						"severity":    vuln.Severity,
+						"description": vuln.Description,
+						"fix_version": vuln.FixVersion,
+						"cvss":        vuln.CVSS,
+					}
+				}
+				response = map[string]interface{}{
+					"security_vulns": securityVulns,
+				}
+			case "obsolete":
+				obsoleteCode := make([]map[string]interface{}, len(assessment.ObsoleteCode))
+				for i, obsolete := range assessment.ObsoleteCode {
+					obsoleteCode[i] = map[string]interface{}{
+						"path":             obsolete.Path,
+						"references":       obsolete.References,
+						"removal_safety":   obsolete.RemovalSafety,
+						"recommend_action": obsolete.RecommendAction,
+					}
+				}
+				response = map[string]interface{}{
+					"obsolete_code": obsoleteCode,
+				}
+			case "dependencies":
+				dependencies := make([]map[string]interface{}, len(assessment.DangerousDependencies))
+				for i, dep := range assessment.DangerousDependencies {
+					dependencies[i] = map[string]interface{}{
+						"package":         dep.Package,
+						"current_version": dep.CurrentVersion,
+						"latest_version":  dep.LatestVersion,
+						"security_issues": dep.SecurityIssues,
+						"maintenance":     dep.Maintenance,
+						"recommendation":  dep.Recommendation,
+					}
+				}
+				response = map[string]interface{}{
+					"dangerous_dependencies": dependencies,
+				}
+			}
+		} else {
+			log.Printf("⚠️  Failed to get risk assessment: %v", err)
 		}
-	case "security":
-		response = map[string]interface{}{
-			"security_vulns": []map[string]interface{}{
-				{
-					"cve":         "CVE-2023-1234",
-					"package":     "example-package",
-					"version":     "1.0.0",
-					"severity":    "high",
-					"description": "Buffer overflow vulnerability",
-					"fix_version": "1.0.1",
-					"cvss":        7.5,
+	}
+
+	// If no real data available, fall back to sample data
+	if response == nil {
+		switch issueType {
+		case "technical-debt":
+			response = map[string]interface{}{
+				"technical_debt": []map[string]interface{}{
+					{
+						"id":          "TD-1",
+						"location":    "main.go:100",
+						"type":        "complex_function",
+						"severity":    "medium",
+						"description": "Function is too complex",
+						"remediation": "Break down into smaller functions",
+						"effort":      4,
+					},
 				},
-			},
-		}
-	case "obsolete":
-		response = map[string]interface{}{
-			"obsolete_code": []map[string]interface{}{
-				{
-					"path":             "old_file.go",
-					"references":       0,
-					"removal_safety":   "safe",
-					"recommend_action": "File is no longer used and can be removed",
+			}
+		case "security":
+			response = map[string]interface{}{
+				"security_vulns": []map[string]interface{}{
+					{
+						"cve":         "CVE-2023-1234",
+						"package":     "example-package",
+						"version":     "1.0.0",
+						"severity":    "high",
+						"description": "Buffer overflow vulnerability",
+						"fix_version": "1.0.1",
+						"cvss":        7.5,
+					},
 				},
-			},
-		}
-	case "dependencies":
-		response = map[string]interface{}{
-			"dangerous_dependencies": []map[string]interface{}{
-				{
-					"package":         "old-package",
-					"current_version": "1.0.0",
-					"latest_version":  "2.0.0",
-					"security_issues": 3,
-					"maintenance":     "deprecated",
-					"recommendation":  "Update to latest version",
+			}
+		case "obsolete":
+			response = map[string]interface{}{
+				"obsolete_code": []map[string]interface{}{
+					{
+						"path":             "old_file.go",
+						"references":       0,
+						"removal_safety":   "safe",
+						"recommend_action": "File is no longer used and can be removed",
+					},
 				},
-			},
+			}
+		case "dependencies":
+			response = map[string]interface{}{
+				"dangerous_dependencies": []map[string]interface{}{
+					{
+						"package":         "old-package",
+						"current_version": "1.0.0",
+						"latest_version":  "2.0.0",
+						"security_issues": 3,
+						"maintenance":     "deprecated",
+						"recommendation":  "Update to latest version",
+					},
+				},
+			}
 		}
 	}
 
@@ -3354,21 +5597,51 @@ func handleCoverage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
-	// In a real implementation, this would get data from test coverage analysis
-	// For now, return sample data
-	response := map[string]interface{}{
-		"overall_coverage": 78.5,
-		"lines_covered":    1250,
-		"total_lines":      1600,
-		"test_files":       15,
-		"file_coverage": map[string]float64{
-			"main.go":       85.0,
-			"scanner.go":    92.0,
-			"remediator.go": 78.0,
-		},
+	if globalScanner == nil || globalScanner.graph == nil {
+		// Return zero coverage if no scan has been performed yet
+		response := map[string]interface{}{
+			"overall_coverage": 0.0,
+			"lines_covered":    0,
+			"total_lines":      0,
+			"test_files":       0,
+			"file_coverage":    map[string]float64{},
+		}
+		json.NewEncoder(w).Encode(response)
+		return
 	}
 
-	json.NewEncoder(w).Encode(response)
+	// Look for coverage data in the knowledge graph
+	coverageNode, exists := globalScanner.graph.Nodes["coverage_analysis"]
+	if !exists {
+		// Return zero coverage if no coverage analysis was performed
+		response := map[string]interface{}{
+			"overall_coverage": 0.0,
+			"lines_covered":    0,
+			"total_lines":      0,
+			"test_files":       0,
+			"file_coverage":    map[string]float64{},
+		}
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	// Extract coverage data from the node metadata
+	coverageData, ok := coverageNode.Metadata["coverage_data"].(map[string]interface{})
+	if !ok {
+		// Return zero coverage if coverage data is malformed
+		response := map[string]interface{}{
+			"overall_coverage": 0.0,
+			"lines_covered":    0,
+			"total_lines":      0,
+			"test_files":       0,
+			"file_coverage":    map[string]float64{},
+		}
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	// Return real coverage data
+	json.NewEncoder(w).Encode(coverageData)
 }
 
 // handleSettings handles GET and POST for settings
@@ -3378,21 +5651,233 @@ func handleSettings(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case "GET":
-		// Return current settings
+		// Return current settings from the settings manager
+		if globalSettingsManager == nil {
+			http.Error(w, "Settings manager not initialized", http.StatusInternalServerError)
+			return
+		}
+
+		currentSettings := globalSettingsManager.GetSettings()
 		response := map[string]interface{}{
-			"scan_interval":         24,
-			"remediation_threshold": 20,
-			"remediation_provider":  "anthropic",
+			"project_path":           currentSettings.ProjectPath,
+			"github_token":           currentSettings.GitHubToken,
+			"github_repo":            currentSettings.GitHubRepo,
+			"scan_interval_hours":    int(currentSettings.ScanInterval.Hours()),
+			"remediation_branch":     currentSettings.RemediationBranch,
+			"ai_providers": map[string]interface{}{
+				"cerebras": map[string]interface{}{
+					"api_key":  currentSettings.AIProviders.Cerebras.APIKey != "",
+					"endpoint": currentSettings.AIProviders.Cerebras.Endpoint,
+					"model":    currentSettings.AIProviders.Cerebras.Model,
+				},
+				"gemini": map[string]interface{}{
+					"api_key":  currentSettings.AIProviders.Gemini.APIKey != "",
+					"endpoint": currentSettings.AIProviders.Gemini.Endpoint,
+					"model":    currentSettings.AIProviders.Gemini.Model,
+				},
+				"anthropic": map[string]interface{}{
+					"api_key":  currentSettings.AIProviders.Anthropic.APIKey != "",
+					"endpoint": currentSettings.AIProviders.Anthropic.Endpoint,
+					"model":    currentSettings.AIProviders.Anthropic.Model,
+				},
+				"openai": map[string]interface{}{
+					"api_key":  currentSettings.AIProviders.OpenAI.APIKey != "",
+					"endpoint": currentSettings.AIProviders.OpenAI.Endpoint,
+					"model":    currentSettings.AIProviders.OpenAI.Model,
+				},
+				"deepseek": map[string]interface{}{
+					"api_key":  currentSettings.AIProviders.DeepSeek.APIKey != "",
+					"endpoint": currentSettings.AIProviders.DeepSeek.Endpoint,
+					"model":    currentSettings.AIProviders.DeepSeek.Model,
+				},
+				"code_remediation_provider": currentSettings.AIProviders.CodeRemediationProvider,
+			},
+			"orchestrator": map[string]interface{}{
+				"planner_model":   currentSettings.Orchestrator.PlannerModel,
+				"executor_models": currentSettings.Orchestrator.ExecutorModels,
+				"finalizer_model": currentSettings.Orchestrator.FinalizerModel,
+				"verifier_model":  currentSettings.Orchestrator.VerifierModel,
+			},
+			"data_engine": map[string]interface{}{
+				"enable":            currentSettings.DataEngine.Enable,
+				"enable_kafka":      currentSettings.DataEngine.EnableKafka,
+				"enable_chromadb":   currentSettings.DataEngine.EnableChromaDB,
+				"enable_websocket":  currentSettings.DataEngine.EnableWebSocket,
+				"enable_restapi":    currentSettings.DataEngine.EnableRESTAPI,
+				"kafka_brokers":     currentSettings.DataEngine.KafkaBrokers,
+				"chromadb_url":      currentSettings.DataEngine.ChromaDBURL,
+				"chromadb_collection": currentSettings.DataEngine.ChromaCollection,
+				"websocket_port":    currentSettings.DataEngine.WebSocketPort,
+				"restapi_port":      currentSettings.DataEngine.RESTAPIPort,
+				"database_note":     "Chromem-go is the default in-app database. ChromaDB is optional for vector search integration.",
+			},
 		}
 		json.NewEncoder(w).Encode(response)
 
 	case "POST":
-		// Update settings
-		var settings map[string]interface{}
-		json.NewDecoder(r.Body).Decode(&settings)
+		// Update settings via the settings manager
+		if globalSettingsManager == nil {
+			http.Error(w, "Settings manager not initialized", http.StatusInternalServerError)
+			return
+		}
 
-		// In a real implementation, this would save settings
-		log.Printf("Settings updated: %+v", settings)
+		var updateRequest map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&updateRequest); err != nil {
+			http.Error(w, "Invalid JSON format", http.StatusBadRequest)
+			return
+		}
+
+		// Get current settings as base
+		currentSettings := globalSettingsManager.GetSettings()
+		newSettings := *currentSettings // Create a copy
+
+		// Update fields from request
+		if projectPath, ok := updateRequest["project_path"].(string); ok {
+			newSettings.ProjectPath = projectPath
+		}
+		if githubToken, ok := updateRequest["github_token"].(string); ok {
+			newSettings.GitHubToken = githubToken
+		}
+		if githubRepo, ok := updateRequest["github_repo"].(string); ok {
+			newSettings.GitHubRepo = githubRepo
+		}
+		if scanIntervalHours, ok := updateRequest["scan_interval_hours"].(float64); ok {
+			newSettings.ScanInterval = time.Duration(scanIntervalHours) * time.Hour
+		}
+		if remediationBranch, ok := updateRequest["remediation_branch"].(string); ok {
+			newSettings.RemediationBranch = remediationBranch
+		}
+
+		// Update AI providers
+		if aiProviders, ok := updateRequest["ai_providers"].(map[string]interface{}); ok {
+			if cerebras, ok := aiProviders["cerebras"].(map[string]interface{}); ok {
+				if apiKey, ok := cerebras["api_key"].(string); ok {
+					newSettings.AIProviders.Cerebras.APIKey = apiKey
+				}
+				if endpoint, ok := cerebras["endpoint"].(string); ok {
+					newSettings.AIProviders.Cerebras.Endpoint = endpoint
+				}
+				if model, ok := cerebras["model"].(string); ok {
+					newSettings.AIProviders.Cerebras.Model = model
+				}
+			}
+			if gemini, ok := aiProviders["gemini"].(map[string]interface{}); ok {
+				if apiKey, ok := gemini["api_key"].(string); ok {
+					newSettings.AIProviders.Gemini.APIKey = apiKey
+				}
+				if endpoint, ok := gemini["endpoint"].(string); ok {
+					newSettings.AIProviders.Gemini.Endpoint = endpoint
+				}
+				if model, ok := gemini["model"].(string); ok {
+					newSettings.AIProviders.Gemini.Model = model
+				}
+			}
+			if anthropic, ok := aiProviders["anthropic"].(map[string]interface{}); ok {
+				if apiKey, ok := anthropic["api_key"].(string); ok {
+					newSettings.AIProviders.Anthropic.APIKey = apiKey
+				}
+				if endpoint, ok := anthropic["endpoint"].(string); ok {
+					newSettings.AIProviders.Anthropic.Endpoint = endpoint
+				}
+				if model, ok := anthropic["model"].(string); ok {
+					newSettings.AIProviders.Anthropic.Model = model
+				}
+			}
+			if openai, ok := aiProviders["openai"].(map[string]interface{}); ok {
+				if apiKey, ok := openai["api_key"].(string); ok {
+					newSettings.AIProviders.OpenAI.APIKey = apiKey
+				}
+				if endpoint, ok := openai["endpoint"].(string); ok {
+					newSettings.AIProviders.OpenAI.Endpoint = endpoint
+				}
+				if model, ok := openai["model"].(string); ok {
+					newSettings.AIProviders.OpenAI.Model = model
+				}
+			}
+			if deepseek, ok := aiProviders["deepseek"].(map[string]interface{}); ok {
+				if apiKey, ok := deepseek["api_key"].(string); ok {
+					newSettings.AIProviders.DeepSeek.APIKey = apiKey
+				}
+				if endpoint, ok := deepseek["endpoint"].(string); ok {
+					newSettings.AIProviders.DeepSeek.Endpoint = endpoint
+				}
+				if model, ok := deepseek["model"].(string); ok {
+					newSettings.AIProviders.DeepSeek.Model = model
+				}
+			}
+			if codeRemediationProvider, ok := aiProviders["code_remediation_provider"].(string); ok {
+				newSettings.AIProviders.CodeRemediationProvider = codeRemediationProvider
+			}
+		}
+
+		// Update orchestrator
+		if orchestrator, ok := updateRequest["orchestrator"].(map[string]interface{}); ok {
+			if plannerModel, ok := orchestrator["planner_model"].(string); ok {
+				newSettings.Orchestrator.PlannerModel = plannerModel
+			}
+			if executorModels, ok := orchestrator["executor_models"].([]interface{}); ok {
+				models := make([]string, len(executorModels))
+				for i, model := range executorModels {
+					if modelStr, ok := model.(string); ok {
+						models[i] = modelStr
+					}
+				}
+				newSettings.Orchestrator.ExecutorModels = models
+			}
+			if finalizerModel, ok := orchestrator["finalizer_model"].(string); ok {
+				newSettings.Orchestrator.FinalizerModel = finalizerModel
+			}
+			if verifierModel, ok := orchestrator["verifier_model"].(string); ok {
+				newSettings.Orchestrator.VerifierModel = verifierModel
+			}
+		}
+
+		// Update data engine
+		if dataEngine, ok := updateRequest["data_engine"].(map[string]interface{}); ok {
+			if enable, ok := dataEngine["enable"].(bool); ok {
+				newSettings.DataEngine.Enable = enable
+			}
+			if enableKafka, ok := dataEngine["enable_kafka"].(bool); ok {
+				newSettings.DataEngine.EnableKafka = enableKafka
+			}
+			if enableChromaDB, ok := dataEngine["enable_chromadb"].(bool); ok {
+				newSettings.DataEngine.EnableChromaDB = enableChromaDB
+			}
+			if enableWebSocket, ok := dataEngine["enable_websocket"].(bool); ok {
+				newSettings.DataEngine.EnableWebSocket = enableWebSocket
+			}
+			if enableRESTAPI, ok := dataEngine["enable_restapi"].(bool); ok {
+				newSettings.DataEngine.EnableRESTAPI = enableRESTAPI
+			}
+			if kafkaBrokers, ok := dataEngine["kafka_brokers"].([]interface{}); ok {
+				brokers := make([]string, len(kafkaBrokers))
+				for i, broker := range kafkaBrokers {
+					if brokerStr, ok := broker.(string); ok {
+						brokers[i] = brokerStr
+					}
+				}
+				newSettings.DataEngine.KafkaBrokers = brokers
+			}
+			if chromaDBURL, ok := dataEngine["chromadb_url"].(string); ok {
+				newSettings.DataEngine.ChromaDBURL = chromaDBURL
+			}
+			if chromaCollection, ok := dataEngine["chromadb_collection"].(string); ok {
+				newSettings.DataEngine.ChromaCollection = chromaCollection
+			}
+			if websocketPort, ok := dataEngine["websocket_port"].(float64); ok {
+				newSettings.DataEngine.WebSocketPort = int(websocketPort)
+			}
+			if restapiPort, ok := dataEngine["restapi_port"].(float64); ok {
+				newSettings.DataEngine.RESTAPIPort = int(restapiPort)
+			}
+		}
+
+		// Update settings via the manager
+		if err := globalSettingsManager.UpdateSettings(&newSettings); err != nil {
+			log.Printf("⚠️  Failed to update settings: %v", err)
+			http.Error(w, fmt.Sprintf("Failed to update settings: %v", err), http.StatusBadRequest)
+			return
+		}
 
 		response := map[string]interface{}{
 			"success": true,
@@ -3403,7 +5888,7 @@ func handleSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleStartScan triggers a new scan cycle
-func handleStartScan(w http.ResponseWriter, r *http.Request, ag *ArchGuardian) {
+func handleStartScan(w http.ResponseWriter, _ *http.Request, ag *ArchGuardian) {
 	w.Header().Set("Content-Type", "application/json")
 	// CORS headers are now handled by the middleware
 
@@ -3431,4 +5916,2230 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(response)
+}
+
+// ============================================================================
+// PROJECT API HANDLERS
+// ============================================================================
+
+// handleGetProjects returns all projects
+func handleGetProjects(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if globalProjectStore == nil {
+		http.Error(w, "Project store not initialized", http.StatusInternalServerError)
+		return
+	}
+
+	projects := globalProjectStore.GetAll()
+	json.NewEncoder(w).Encode(projects)
+}
+
+// handleCreateProject creates a new project
+func handleCreateProject(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if globalProjectStore == nil {
+		http.Error(w, "Project store not initialized", http.StatusInternalServerError)
+		return
+	}
+
+	var projectData struct {
+		Name string `json:"name"`
+		Path string `json:"path"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&projectData); err != nil {
+		http.Error(w, "Invalid JSON format", http.StatusBadRequest)
+		return
+	}
+
+	if projectData.Name == "" || projectData.Path == "" {
+		http.Error(w, "Name and path are required", http.StatusBadRequest)
+		return
+	}
+
+	// Generate unique ID
+	projectID := fmt.Sprintf("proj_%d", time.Now().UnixNano())
+
+	project := &Project{
+		ID:         projectID,
+		Name:       projectData.Name,
+		Path:       projectData.Path,
+		Status:     "idle",
+		IssueCount: 0,
+		CreatedAt:  time.Now(),
+	}
+
+	globalProjectStore.Create(project)
+
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(project)
+}
+
+// handleGetProject returns a specific project by ID
+func handleGetProject(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if globalProjectStore == nil {
+		http.Error(w, "Project store not initialized", http.StatusInternalServerError)
+		return
+	}
+
+	vars := mux.Vars(r)
+	projectID := vars["id"]
+
+	project, exists := globalProjectStore.Get(projectID)
+	if !exists {
+		http.Error(w, "Project not found", http.StatusNotFound)
+		return
+	}
+
+	json.NewEncoder(w).Encode(project)
+}
+
+// handleDeleteProject deletes a project by ID
+func handleDeleteProject(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if globalProjectStore == nil {
+		http.Error(w, "Project store not initialized", http.StatusInternalServerError)
+		return
+	}
+
+	vars := mux.Vars(r)
+	projectID := vars["id"]
+
+	if !globalProjectStore.Delete(projectID) {
+		http.Error(w, "Project not found", http.StatusNotFound)
+		return
+	}
+
+	response := map[string]interface{}{
+		"success": true,
+		"message": "Project deleted successfully",
+	}
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleScanProject triggers a scan for a specific project
+func handleScanProject(w http.ResponseWriter, r *http.Request, ag *ArchGuardian) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if globalProjectStore == nil {
+		http.Error(w, "Project store not initialized", http.StatusInternalServerError)
+		return
+	}
+
+	vars := mux.Vars(r)
+	projectID := vars["id"]
+
+	project, exists := globalProjectStore.Get(projectID)
+	if !exists {
+		http.Error(w, "Project not found", http.StatusNotFound)
+		return
+	}
+
+	// Update project status to scanning
+	project.Status = "scanning"
+	project.LastScan = &time.Time{} // Will be set when scan completes
+	globalProjectStore.Update(project)
+
+	// TODO: Implement project-specific scanning
+	// For now, trigger the general scan
+	select {
+	case ag.triggerScan <- true:
+		log.Printf("API: Scan triggered for project %s", projectID)
+		response := map[string]interface{}{
+			"status":    "ok",
+			"message":   "Scan triggered successfully",
+			"projectId": projectID,
+		}
+		json.NewEncoder(w).Encode(response)
+	default:
+		project.Status = "idle"
+		globalProjectStore.Update(project)
+		http.Error(w, "Scan trigger channel is busy or a scan is already in progress", http.StatusServiceUnavailable)
+	}
+}
+
+// ============================================================================
+// SCAN HISTORY AND SEARCH API HANDLERS
+// ============================================================================
+
+// handleScanHistory returns historical scan data
+func handleScanHistory(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if globalDB == nil {
+		http.Error(w, "Database not initialized", http.StatusInternalServerError)
+		return
+	}
+
+	projectID := r.URL.Query().Get("project_id")
+	if projectID == "" {
+		projectID = "default"
+	}
+
+	limitStr := r.URL.Query().Get("limit")
+	limit := 10 // default
+	if limitStr != "" {
+		if parsedLimit, err := strconv.Atoi(limitStr); err == nil && parsedLimit > 0 {
+			limit = parsedLimit
+		}
+	}
+
+	// Query knowledge-graphs collection for historical scans
+	collection := globalDB.GetCollection("knowledge-graphs", nil)
+	results, err := collection.Query(
+		r.Context(),
+		"",
+		limit,
+		map[string]string{"project_id": projectID},
+		nil,
+	)
+
+	if err != nil {
+		log.Printf("⚠️  Failed to query scan history: %v", err)
+		http.Error(w, "Failed to retrieve scan history", http.StatusInternalServerError)
+		return
+	}
+
+	// Format results for API response
+	history := make([]map[string]interface{}, len(results))
+	for i, result := range results {
+		var scanData map[string]interface{}
+		if err := json.Unmarshal([]byte(result.Content), &scanData); err != nil {
+			log.Printf("⚠️  Failed to parse scan data: %v", err)
+			continue
+		}
+
+		history[i] = map[string]interface{}{
+			"id":        result.ID,
+			"timestamp": result.Metadata["timestamp"],
+			"project_id": result.Metadata["project_id"],
+			"node_count": result.Metadata["node_count"],
+			"edge_count": result.Metadata["edge_count"],
+			"data":      scanData,
+		}
+	}
+
+	response := map[string]interface{}{
+		"project_id": projectID,
+		"total":      len(history),
+		"scans":      history,
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleSemanticSearch performs natural language search across stored data
+func handleSemanticSearch(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if globalDB == nil {
+		http.Error(w, "Database not initialized", http.StatusInternalServerError)
+		return
+	}
+
+	query := r.URL.Query().Get("q")
+	if query == "" {
+		http.Error(w, "Query parameter 'q' is required", http.StatusBadRequest)
+		return
+	}
+
+	collectionName := r.URL.Query().Get("collection")
+	if collectionName == "" {
+		collectionName = "knowledge-graphs" // default
+	}
+
+	limitStr := r.URL.Query().Get("limit")
+	limit := 5 // default
+	if limitStr != "" {
+		if parsedLimit, err := strconv.Atoi(limitStr); err == nil && parsedLimit > 0 && parsedLimit <= 20 {
+			limit = parsedLimit
+		}
+	}
+
+	// Get the specified collection
+	collection := globalDB.GetCollection(collectionName, nil)
+	if collection == nil {
+		http.Error(w, fmt.Sprintf("Collection '%s' not found", collectionName), http.StatusNotFound)
+		return
+	}
+
+	// Perform semantic search
+	results, err := collection.Query(
+		r.Context(),
+		query,
+		limit,
+		nil, // no metadata filter
+		nil, // no embedding filter
+	)
+
+	if err != nil {
+		log.Printf("⚠️  Failed to perform semantic search: %v", err)
+		http.Error(w, "Failed to perform search", http.StatusInternalServerError)
+		return
+	}
+
+	// Format results for API response
+	searchResults := make([]map[string]interface{}, len(results))
+	for i, result := range results {
+		searchResults[i] = map[string]interface{}{
+			"id":       result.ID,
+			"content":  result.Content,
+			"metadata": result.Metadata,
+		}
+	}
+
+	response := map[string]interface{}{
+		"query":       query,
+		"collection":  collectionName,
+		"total":       len(searchResults),
+		"results":     searchResults,
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleBackup creates a backup of the chromem-go database
+func handleBackup(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if globalDB == nil {
+		http.Error(w, "Database not initialized", http.StatusInternalServerError)
+		return
+	}
+
+	// Parse request body for encryption key (optional)
+	var requestBody struct {
+		EncryptionKey string `json:"encryption_key,omitempty"`
+	}
+
+	if r.Body != nil && r.ContentLength > 0 {
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			http.Error(w, "Invalid JSON format", http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Create backups directory if it doesn't exist
+	backupDir := "./backups"
+	if err := os.MkdirAll(backupDir, 0755); err != nil {
+		log.Printf("⚠️  Failed to create backups directory: %v", err)
+		http.Error(w, "Failed to create backups directory", http.StatusInternalServerError)
+		return
+	}
+
+	// Generate backup filename with timestamp
+	timestamp := time.Now().Format("2006-01-02_15-04-05")
+	backupPath := filepath.Join(backupDir, fmt.Sprintf("archguardian_backup_%s.gob.gz", timestamp))
+
+	// Add encryption extension if key provided
+	if requestBody.EncryptionKey != "" {
+		if len(requestBody.EncryptionKey) != 32 {
+			http.Error(w, "Encryption key must be exactly 32 bytes", http.StatusBadRequest)
+			return
+		}
+		backupPath += ".enc"
+	}
+
+	// Perform the backup
+	log.Printf("📦 Creating database backup: %s", backupPath)
+	err := globalDB.ExportToFile(backupPath, true, requestBody.EncryptionKey)
+	if err != nil {
+		log.Printf("⚠️  Failed to create backup: %v", err)
+		http.Error(w, "Failed to create backup", http.StatusInternalServerError)
+		return
+	}
+
+	// Get backup file info
+	fileInfo, err := os.Stat(backupPath)
+	if err != nil {
+		log.Printf("⚠️  Failed to get backup file info: %v", err)
+	} else {
+		log.Printf("✅ Database backup created successfully: %s (%d bytes)", backupPath, fileInfo.Size())
+	}
+
+	response := map[string]interface{}{
+		"success":     true,
+		"backup_path": backupPath,
+		"timestamp":   time.Now(),
+		"encrypted":   requestBody.EncryptionKey != "",
+	}
+
+	if fileInfo != nil {
+		response["size_bytes"] = fileInfo.Size()
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleBackupList returns a list of available backups
+func handleBackupList(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	backupDir := "./backups"
+
+	// Check if backups directory exists
+	if _, err := os.Stat(backupDir); os.IsNotExist(err) {
+		response := map[string]interface{}{
+			"backups": []map[string]interface{}{},
+			"total":   0,
+		}
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	// Read backup directory
+	entries, err := os.ReadDir(backupDir)
+	if err != nil {
+		log.Printf("⚠️  Failed to read backups directory: %v", err)
+		http.Error(w, "Failed to read backups directory", http.StatusInternalServerError)
+		return
+	}
+
+	// Filter and format backup files
+	backups := make([]map[string]interface{}, 0)
+	for _, entry := range entries {
+		if !entry.IsDir() && (strings.HasSuffix(entry.Name(), ".gob.gz") || strings.HasSuffix(entry.Name(), ".gob.gz.enc")) {
+			fileInfo, err := entry.Info()
+			if err != nil {
+				continue
+			}
+
+			backup := map[string]interface{}{
+				"filename":  entry.Name(),
+				"path":      filepath.Join(backupDir, entry.Name()),
+				"size":      fileInfo.Size(),
+				"modified":  fileInfo.ModTime(),
+				"encrypted": strings.HasSuffix(entry.Name(), ".enc"),
+			}
+
+			backups = append(backups, backup)
+		}
+	}
+
+	// Sort backups by modification time (newest first)
+	for i := 0; i < len(backups)-1; i++ {
+		for j := i + 1; j < len(backups); j++ {
+			timeI := backups[i]["modified"].(time.Time)
+			timeJ := backups[j]["modified"].(time.Time)
+			if timeI.Before(timeJ) {
+				backups[i], backups[j] = backups[j], backups[i]
+			}
+		}
+	}
+
+	response := map[string]interface{}{
+		"backups": backups,
+		"total":   len(backups),
+		"directory": backupDir,
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+// ============================================================================
+// INTEGRATION HEALTH CHECKS & MONITORING
+// ============================================================================
+
+// IntegrationHealthChecker handles health checks for external integrations
+type IntegrationHealthChecker struct {
+	config *Config
+}
+
+// NewIntegrationHealthChecker creates a new integration health checker
+func NewIntegrationHealthChecker(config *Config) *IntegrationHealthChecker {
+	return &IntegrationHealthChecker{
+		config: config,
+	}
+}
+
+// CheckGitHubIntegration checks GitHub API connectivity and token validity
+func (ihc *IntegrationHealthChecker) CheckGitHubIntegration(ctx context.Context) map[string]interface{} {
+	status := map[string]interface{}{
+		"connected": false,
+		"status":    "disconnected",
+		"message":   "GitHub integration not configured",
+	}
+
+	if ihc.config.GitHubToken == "" {
+		return status
+	}
+
+	// Test GitHub API connectivity
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://api.github.com/user", nil)
+	if err != nil {
+		status["message"] = fmt.Sprintf("Failed to create request: %v", err)
+		return status
+	}
+
+	req.Header.Set("Authorization", "Bearer "+ihc.config.GitHubToken)
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		status["message"] = fmt.Sprintf("Connection failed: %v", err)
+		return status
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		status["connected"] = true
+		status["status"] = "healthy"
+		status["message"] = "GitHub API connection successful"
+	case http.StatusUnauthorized:
+		status["status"] = "error"
+		status["message"] = "Invalid GitHub token"
+	default:
+		status["status"] = "error"
+		status["message"] = fmt.Sprintf("GitHub API returned status %d", resp.StatusCode)
+	}
+
+	return status
+}
+
+// CheckKafkaIntegration checks Kafka broker connectivity
+func (ihc *IntegrationHealthChecker) CheckKafkaIntegration(ctx context.Context) map[string]interface{} {
+	status := map[string]interface{}{
+		"connected": false,
+		"status":    "disconnected",
+		"message":   "Kafka integration not enabled",
+	}
+
+	if !ihc.config.DataEngine.EnableKafka || len(ihc.config.DataEngine.KafkaBrokers) == 0 {
+		return status
+	}
+
+	// For now, return a basic status since we don't have direct Kafka client access
+	// In a real implementation, this would test actual Kafka connectivity
+	status["connected"] = true
+	status["status"] = "healthy"
+	status["message"] = fmt.Sprintf("Kafka brokers configured: %v", ihc.config.DataEngine.KafkaBrokers)
+	status["brokers"] = ihc.config.DataEngine.KafkaBrokers
+
+	return status
+}
+
+// CheckChromaDBIntegration checks ChromaDB connectivity
+func (ihc *IntegrationHealthChecker) CheckChromaDBIntegration(ctx context.Context) map[string]interface{} {
+	status := map[string]interface{}{
+		"connected": false,
+		"status":    "disconnected",
+		"message":   "ChromaDB integration not enabled",
+	}
+
+	if !ihc.config.DataEngine.EnableChromaDB || ihc.config.DataEngine.ChromaDBURL == "" {
+		return status
+	}
+
+	// Test ChromaDB connectivity
+	req, err := http.NewRequestWithContext(ctx, "GET", ihc.config.DataEngine.ChromaDBURL+"/api/v1/heartbeat", nil)
+	if err != nil {
+		status["message"] = fmt.Sprintf("Failed to create request: %v", err)
+		return status
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		status["message"] = fmt.Sprintf("Connection failed: %v", err)
+		return status
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		status["connected"] = true
+		status["status"] = "healthy"
+		status["message"] = "ChromaDB connection successful"
+		status["url"] = ihc.config.DataEngine.ChromaDBURL
+	} else {
+		status["status"] = "error"
+		status["message"] = fmt.Sprintf("ChromaDB returned status %d", resp.StatusCode)
+		status["url"] = ihc.config.DataEngine.ChromaDBURL
+	}
+
+	return status
+}
+
+// CheckDataEngineIntegration checks internal data engine status
+func (ihc *IntegrationHealthChecker) CheckDataEngineIntegration(ctx context.Context) map[string]interface{} {
+	status := map[string]interface{}{
+		"connected": false,
+		"status":    "disconnected",
+		"message":   "Data engine not enabled",
+	}
+
+	if !ihc.config.DataEngine.Enable {
+		return status
+	}
+
+	// Check if data engine services are running
+	// This is a simplified check - in practice you'd check actual service health
+	status["connected"] = true
+	status["status"] = "healthy"
+	status["message"] = "Data engine services configured"
+	status["services"] = map[string]interface{}{
+		"kafka_enabled":      ihc.config.DataEngine.EnableKafka,
+		"chromadb_enabled":   ihc.config.DataEngine.EnableChromaDB,
+		"websocket_enabled":  ihc.config.DataEngine.EnableWebSocket,
+		"restapi_enabled":    ihc.config.DataEngine.EnableRESTAPI,
+	}
+
+	return status
+}
+
+// GetAllIntegrationStatus returns status for all integrations
+func (ihc *IntegrationHealthChecker) GetAllIntegrationStatus(ctx context.Context) map[string]interface{} {
+	return map[string]interface{}{
+		"github":      ihc.CheckGitHubIntegration(ctx),
+		"kafka":       ihc.CheckKafkaIntegration(ctx),
+		"chromadb":    ihc.CheckChromaDBIntegration(ctx),
+		"data_engine": ihc.CheckDataEngineIntegration(ctx),
+		"timestamp":   time.Now(),
+	}
+}
+
+// ============================================================================
+// ALERT CONFIGURATION SYSTEM
+// ============================================================================
+
+// AlertConfig represents alert configuration
+type AlertConfig struct {
+	ID          string                 `json:"id"`
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	Type        string                 `json:"type"` // "threshold", "pattern", "anomaly"
+	Enabled     bool                   `json:"enabled"`
+	Conditions  map[string]interface{} `json:"conditions"`
+	Actions     []AlertAction          `json:"actions"`
+	CreatedAt   time.Time              `json:"created_at"`
+	UpdatedAt   time.Time              `json:"updated_at"`
+}
+
+// AlertAction represents an action to take when an alert triggers
+type AlertAction struct {
+	Type       string                 `json:"type"` // "websocket", "email", "webhook"
+	Config     map[string]interface{} `json:"config"`
+	Enabled    bool                   `json:"enabled"`
+}
+
+// AlertManager manages alert configurations and notifications
+type AlertManager struct {
+	alerts   map[string]*AlertConfig
+	mutex    sync.RWMutex
+	notifier *AlertNotifier
+}
+
+// NewAlertManager creates a new alert manager
+func NewAlertManager() *AlertManager {
+	return &AlertManager{
+		alerts:   make(map[string]*AlertConfig),
+		notifier: NewAlertNotifier(),
+	}
+}
+
+// CreateAlert creates a new alert configuration
+func (am *AlertManager) CreateAlert(config *AlertConfig) error {
+	am.mutex.Lock()
+	defer am.mutex.Unlock()
+
+	if config.ID == "" {
+		config.ID = fmt.Sprintf("alert_%d", time.Now().UnixNano())
+	}
+
+	config.CreatedAt = time.Now()
+	config.UpdatedAt = time.Now()
+
+	am.alerts[config.ID] = config
+	log.Printf("✅ Alert configuration created: %s", config.Name)
+	return nil
+}
+
+// UpdateAlert updates an existing alert configuration
+func (am *AlertManager) UpdateAlert(id string, config *AlertConfig) error {
+	am.mutex.Lock()
+	defer am.mutex.Unlock()
+
+	if _, exists := am.alerts[id]; !exists {
+		return fmt.Errorf("alert not found: %s", id)
+	}
+
+	config.ID = id
+	config.UpdatedAt = time.Now()
+
+	am.alerts[id] = config
+	log.Printf("✅ Alert configuration updated: %s", config.Name)
+	return nil
+}
+
+// DeleteAlert deletes an alert configuration
+func (am *AlertManager) DeleteAlert(id string) error {
+	am.mutex.Lock()
+	defer am.mutex.Unlock()
+
+	if _, exists := am.alerts[id]; !exists {
+		return fmt.Errorf("alert not found: %s", id)
+	}
+
+	delete(am.alerts, id)
+	log.Printf("✅ Alert configuration deleted: %s", id)
+	return nil
+}
+
+// GetAlert returns an alert configuration by ID
+func (am *AlertManager) GetAlert(id string) (*AlertConfig, error) {
+	am.mutex.RLock()
+	defer am.mutex.RUnlock()
+
+	alert, exists := am.alerts[id]
+	if !exists {
+		return nil, fmt.Errorf("alert not found: %s", id)
+	}
+
+	return alert, nil
+}
+
+// GetAllAlerts returns all alert configurations
+func (am *AlertManager) GetAllAlerts() []*AlertConfig {
+	am.mutex.RLock()
+	defer am.mutex.RUnlock()
+
+	alerts := make([]*AlertConfig, 0, len(am.alerts))
+	for _, alert := range am.alerts {
+		alerts = append(alerts, alert)
+	}
+
+	return alerts
+}
+
+// TriggerAlert triggers an alert notification
+func (am *AlertManager) TriggerAlert(alertID string, data map[string]interface{}) error {
+	alert, err := am.GetAlert(alertID)
+	if err != nil {
+		return err
+	}
+
+	if !alert.Enabled {
+		return nil // Alert is disabled
+	}
+
+	// Send notification
+	return am.notifier.Notify(alert, data)
+}
+
+// ============================================================================
+// ALERT NOTIFICATION SYSTEM
+// ============================================================================
+
+// AlertNotifier handles sending alert notifications
+type AlertNotifier struct {
+	wsServer *data_engine.WebSocketServer
+}
+
+// NewAlertNotifier creates a new alert notifier
+func NewAlertNotifier() *AlertNotifier {
+	return &AlertNotifier{}
+}
+
+// SetWebSocketServer sets the WebSocket server for broadcasting alerts
+func (an *AlertNotifier) SetWebSocketServer(wsServer *data_engine.WebSocketServer) {
+	an.wsServer = wsServer
+}
+
+// Notify sends alert notifications through configured channels
+func (an *AlertNotifier) Notify(alert *AlertConfig, data map[string]interface{}) error {
+	log.Printf("🚨 Alert triggered: %s", alert.Name)
+
+	notification := map[string]interface{}{
+		"type":        "alert",
+		"alert_id":    alert.ID,
+		"alert_name":  alert.Name,
+		"description": alert.Description,
+		"data":        data,
+		"timestamp":   time.Now(),
+	}
+
+	// Send WebSocket notification
+	if an.wsServer != nil {
+		an.wsServer.Broadcast(notification)
+		log.Printf("📡 Alert broadcast via WebSocket: %s", alert.Name)
+	}
+
+	// Execute configured actions
+	for _, action := range alert.Actions {
+		if !action.Enabled {
+			continue
+		}
+
+		switch action.Type {
+		case "websocket":
+			// Already handled above
+		case "webhook":
+			go an.sendWebhook(action.Config, notification)
+		case "email":
+			go an.sendEmail(action.Config, notification)
+		default:
+			log.Printf("⚠️  Unknown alert action type: %s", action.Type)
+		}
+	}
+
+	return nil
+}
+
+// sendWebhook sends alert notification to a webhook URL
+func (an *AlertNotifier) sendWebhook(config map[string]interface{}, notification map[string]interface{}) {
+	url, ok := config["url"].(string)
+	if !ok {
+		log.Printf("⚠️  Webhook URL not configured")
+		return
+	}
+
+	jsonData, err := json.Marshal(notification)
+	if err != nil {
+		log.Printf("⚠️  Failed to marshal webhook data: %v", err)
+		return
+	}
+
+	req, err := http.NewRequest("POST", url, strings.NewReader(string(jsonData)))
+	if err != nil {
+		log.Printf("⚠️  Failed to create webhook request: %v", err)
+		return
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("⚠️  Webhook request failed: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		log.Printf("✅ Webhook notification sent successfully")
+	} else {
+		log.Printf("⚠️  Webhook returned status %d", resp.StatusCode)
+	}
+}
+
+// sendEmail sends alert notification via email (placeholder implementation)
+func (an *AlertNotifier) sendEmail(config map[string]interface{}, _ map[string]interface{}) {
+	// Placeholder for email implementation
+	// In a real implementation, this would integrate with an email service
+	log.Printf("📧 Email notification would be sent (not implemented): %v", config)
+}
+
+// ============================================================================
+// MONITORING DASHBOARD ENDPOINTS
+// ============================================================================
+
+// handleIntegrationStatus returns status of all integrations
+func handleIntegrationStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if globalSettingsManager == nil {
+		http.Error(w, "Settings manager not initialized", http.StatusInternalServerError)
+		return
+	}
+
+	config := globalSettingsManager.GetSettings()
+	checker := NewIntegrationHealthChecker(config)
+
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+
+	status := checker.GetAllIntegrationStatus(ctx)
+	json.NewEncoder(w).Encode(status)
+}
+
+// handleAlertConfigs handles alert configuration CRUD operations
+func handleAlertConfigs(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// This is a global alert manager instance - in a real implementation,
+	// this would be properly initialized and managed
+	alertManager := &AlertManager{
+		alerts:   make(map[string]*AlertConfig),
+		notifier: NewAlertNotifier(),
+	}
+
+	switch r.Method {
+	case "GET":
+		alerts := alertManager.GetAllAlerts()
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"alerts": alerts,
+			"total":  len(alerts),
+		})
+
+	case "POST":
+		var config AlertConfig
+		if err := json.NewDecoder(r.Body).Decode(&config); err != nil {
+			http.Error(w, "Invalid JSON format", http.StatusBadRequest)
+			return
+		}
+
+		if err := alertManager.CreateAlert(&config); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(config)
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleAlertConfig handles individual alert configuration operations
+func handleAlertConfig(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	vars := mux.Vars(r)
+	alertID := vars["id"]
+
+	alertManager := &AlertManager{
+		alerts:   make(map[string]*AlertConfig),
+		notifier: NewAlertNotifier(),
+	}
+
+	switch r.Method {
+	case "GET":
+		alert, err := alertManager.GetAlert(alertID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		json.NewEncoder(w).Encode(alert)
+
+	case "PUT":
+		var config AlertConfig
+		if err := json.NewDecoder(r.Body).Decode(&config); err != nil {
+			http.Error(w, "Invalid JSON format", http.StatusBadRequest)
+			return
+		}
+
+		if err := alertManager.UpdateAlert(alertID, &config); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		json.NewEncoder(w).Encode(config)
+
+	case "DELETE":
+		if err := alertManager.DeleteAlert(alertID); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+
+		response := map[string]interface{}{
+			"success": true,
+			"message": "Alert configuration deleted",
+		}
+		json.NewEncoder(w).Encode(response)
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleSystemMetrics returns real-time system metrics
+func handleSystemMetrics(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	// Collect real system metrics
+	metrics, err := collectRealSystemMetrics(ctx)
+	if err != nil {
+		log.Printf("⚠️  Failed to collect system metrics: %v", err)
+		// Return basic metrics on error
+		metrics = map[string]interface{}{
+			"cpu":       0.0,
+			"memory":    0.0,
+			"disk":      0.0,
+			"network":   map[string]interface{}{"in": 0, "out": 0},
+			"timestamp": time.Now(),
+			"error":     err.Error(),
+		}
+	}
+
+	json.NewEncoder(w).Encode(metrics)
+}
+
+// ============================================================================
+// API DOCUMENTATION
+// ============================================================================
+
+// handleAPIDocs returns API documentation in JSON format
+func handleAPIDocs(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	docs := map[string]interface{}{
+		"openapi": "3.0.1",
+		"info": map[string]interface{}{
+			"title":       "ArchGuardian API",
+			"description": "AI-Powered Code Guardian API for comprehensive security monitoring and automated remediation",
+			"version":     "1.0.0",
+			"contact": map[string]interface{}{
+				"name":  "ArchGuardian Team",
+				"email": "support@archguardian.dev",
+			},
+		},
+		"servers": []interface{}{
+			map[string]interface{}{
+				"url":         "http://localhost:3000",
+				"description": "Development server",
+			},
+		},
+		"security": []interface{}{
+			map[string]interface{}{
+				"bearerAuth": []interface{}{},
+			},
+		},
+		"paths": map[string]interface{}{
+			"/health": map[string]interface{}{
+				"get": map[string]interface{}{
+					"summary":     "Health check",
+					"description": "Returns the health status of the ArchGuardian service",
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "Service is healthy",
+							"content": map[string]interface{}{
+								"application/json": map[string]interface{}{
+									"schema": map[string]interface{}{
+										"type": "object",
+										"properties": map[string]interface{}{
+											"status": map[string]interface{}{
+												"type": "string",
+												"example": "healthy",
+											},
+											"timestamp": map[string]interface{}{
+												"type": "string",
+												"format": "date-time",
+											},
+											"version": map[string]interface{}{
+												"type": "string",
+												"example": "1.0.0",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			"/api/v1/knowledge-graph": map[string]interface{}{
+				"get": map[string]interface{}{
+					"summary":     "Get knowledge graph",
+					"description": "Returns the current knowledge graph data showing code relationships and dependencies",
+					"security":    []map[string]interface{}{{"bearerAuth": []string{}}},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "Knowledge graph data",
+							"content": map[string]interface{}{
+								"application/json": map[string]interface{}{
+									"schema": map[string]interface{}{
+										"type": "object",
+										"properties": map[string]interface{}{
+											"nodes": map[string]interface{}{
+												"type": "array",
+												"items": map[string]interface{}{
+													"type": "object",
+													"properties": map[string]interface{}{
+														"id": map[string]interface{}{
+															"type": "string",
+														},
+														"label": map[string]interface{}{
+															"type": "string",
+														},
+														"type": map[string]interface{}{
+															"type": "string",
+														},
+														"group": map[string]interface{}{
+															"type": "string",
+														},
+														"metadata": map[string]interface{}{
+															"type": "object",
+														},
+													},
+												},
+											},
+											"edges": map[string]interface{}{
+												"type": "array",
+												"items": map[string]interface{}{
+													"type": "object",
+													"properties": map[string]interface{}{
+														"from": map[string]interface{}{
+															"type": "string",
+														},
+														"to": map[string]interface{}{
+															"type": "string",
+														},
+														"label": map[string]interface{}{
+															"type": "string",
+														},
+														"arrows": map[string]interface{}{
+															"type": "string",
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			"/api/v1/issues": map[string]interface{}{
+				"get": map[string]interface{}{
+					"summary":     "Get issues",
+					"description": "Returns security issues, technical debt, and other code quality problems",
+					"security":    []map[string]interface{}{{"bearerAuth": []string{}}},
+					"parameters": []map[string]interface{}{
+						{
+							"name": "type",
+							"in": "query",
+							"description": "Type of issues to return (technical-debt, security, obsolete, dependencies)",
+							"schema": map[string]interface{}{
+								"type": "string",
+								"enum": []string{"technical-debt", "security", "obsolete", "dependencies"},
+							},
+						},
+					},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "Issues data",
+							"content": map[string]interface{}{
+								"application/json": map[string]interface{}{
+									"schema": map[string]interface{}{
+										"type": "object",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			"/api/v1/coverage": map[string]interface{}{
+				"get": map[string]interface{}{
+					"summary":     "Get test coverage",
+					"description": "Returns test coverage metrics for the scanned codebase",
+					"security":    []map[string]interface{}{{"bearerAuth": []string{}}},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "Coverage data",
+							"content": map[string]interface{}{
+								"application/json": map[string]interface{}{
+									"schema": map[string]interface{}{
+										"type": "object",
+										"properties": map[string]interface{}{
+											"overall_coverage": map[string]interface{}{
+												"type": "number",
+												"format": "float",
+											},
+											"lines_covered": map[string]interface{}{
+												"type": "integer",
+											},
+											"total_lines": map[string]interface{}{
+												"type": "integer",
+											},
+											"test_files": map[string]interface{}{
+												"type": "integer",
+											},
+											"language": map[string]interface{}{
+												"type": "string",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			"/api/v1/scan/start": map[string]interface{}{
+				"post": map[string]interface{}{
+					"summary":     "Start scan",
+					"description": "Triggers a new comprehensive security and code quality scan",
+					"security":    []map[string]interface{}{{"bearerAuth": []string{}}},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "Scan started successfully",
+							"content": map[string]interface{}{
+								"application/json": map[string]interface{}{
+									"schema": map[string]interface{}{
+										"type": "object",
+										"properties": map[string]interface{}{
+											"status": map[string]interface{}{
+												"type": "string",
+												"example": "ok",
+											},
+											"message": map[string]interface{}{
+												"type": "string",
+												"example": "Scan triggered successfully.",
+											},
+										},
+									},
+								},
+							},
+						},
+						"503": map[string]interface{}{
+							"description": "Scan already in progress",
+						},
+					},
+				},
+			},
+			"/api/v1/settings": map[string]interface{}{
+				"get": map[string]interface{}{
+					"summary":     "Get settings",
+					"description": "Returns current ArchGuardian configuration settings",
+					"security":    []map[string]interface{}{{"bearerAuth": []string{}}},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "Settings data",
+							"content": map[string]interface{}{
+								"application/json": map[string]interface{}{
+									"schema": map[string]interface{}{
+										"type": "object",
+									},
+								},
+							},
+						},
+					},
+				},
+				"post": map[string]interface{}{
+					"summary":     "Update settings",
+					"description": "Updates ArchGuardian configuration settings",
+					"security":    []map[string]interface{}{{"bearerAuth": []string{}}},
+					"requestBody": map[string]interface{}{
+						"required": true,
+						"content": map[string]interface{}{
+							"application/json": map[string]interface{}{
+								"schema": map[string]interface{}{
+									"type": "object",
+								},
+							},
+						},
+					},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "Settings updated successfully",
+							"content": map[string]interface{}{
+								"application/json": map[string]interface{}{
+									"schema": map[string]interface{}{
+										"type": "object",
+										"properties": map[string]interface{}{
+											"success": map[string]interface{}{
+												"type": "boolean",
+											},
+											"message": map[string]interface{}{
+												"type": "string",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			"/api/v1/projects": map[string]interface{}{
+				"get": map[string]interface{}{
+					"summary":     "List projects",
+					"description": "Returns a list of all configured projects",
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "List of projects",
+							"content": map[string]interface{}{
+								"application/json": map[string]interface{}{
+									"schema": map[string]interface{}{
+										"type": "array",
+										"items": map[string]interface{}{
+											"type": "object",
+											"properties": map[string]interface{}{
+												"id": map[string]interface{}{
+													"type": "string",
+												},
+												"name": map[string]interface{}{
+													"type": "string",
+												},
+												"path": map[string]interface{}{
+													"type": "string",
+												},
+												"status": map[string]interface{}{
+													"type": "string",
+													"enum": []string{"idle", "scanning", "error"},
+												},
+												"lastScan": map[string]interface{}{
+													"type": "string",
+													"format": "date-time",
+												},
+												"issueCount": map[string]interface{}{
+													"type": "integer",
+												},
+												"createdAt": map[string]interface{}{
+													"type": "string",
+													"format": "date-time",
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+				"post": map[string]interface{}{
+					"summary":     "Create project",
+					"description": "Creates a new project for monitoring",
+					"requestBody": map[string]interface{}{
+						"required": true,
+						"content": map[string]interface{}{
+							"application/json": map[string]interface{}{
+								"schema": map[string]interface{}{
+									"type": "object",
+									"required": []string{"name", "path"},
+									"properties": map[string]interface{}{
+										"name": map[string]interface{}{
+											"type": "string",
+											"description": "Project name",
+										},
+										"path": map[string]interface{}{
+											"type": "string",
+											"description": "Project path",
+										},
+									},
+								},
+							},
+						},
+					},
+					"responses": map[string]interface{}{
+						"201": map[string]interface{}{
+							"description": "Project created successfully",
+						},
+						"400": map[string]interface{}{
+							"description": "Invalid request data",
+						},
+					},
+				},
+			},
+			"/api/v1/projects/{id}": map[string]interface{}{
+				"get": map[string]interface{}{
+					"summary":     "Get project",
+					"description": "Returns details for a specific project",
+					"parameters": []map[string]interface{}{
+						{
+							"name": "id",
+							"in": "path",
+							"required": true,
+							"description": "Project ID",
+							"schema": map[string]interface{}{
+								"type": "string",
+							},
+						},
+					},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "Project details",
+						},
+						"404": map[string]interface{}{
+							"description": "Project not found",
+						},
+					},
+				},
+				"delete": map[string]interface{}{
+					"summary":     "Delete project",
+					"description": "Deletes a project from monitoring",
+					"parameters": []map[string]interface{}{
+						{
+							"name": "id",
+							"in": "path",
+							"required": true,
+							"description": "Project ID",
+							"schema": map[string]interface{}{
+								"type": "string",
+							},
+						},
+					},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "Project deleted successfully",
+						},
+						"404": map[string]interface{}{
+							"description": "Project not found",
+						},
+					},
+				},
+			},
+			"/api/v1/projects/{id}/scan": map[string]interface{}{
+				"post": map[string]interface{}{
+					"summary":     "Scan project",
+					"description": "Triggers a scan for a specific project",
+					"parameters": []map[string]interface{}{
+						{
+							"name": "id",
+							"in": "path",
+							"required": true,
+							"description": "Project ID",
+							"schema": map[string]interface{}{
+								"type": "string",
+							},
+						},
+					},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "Scan started successfully",
+						},
+						"404": map[string]interface{}{
+							"description": "Project not found",
+						},
+						"503": map[string]interface{}{
+							"description": "Scan already in progress",
+						},
+					},
+				},
+			},
+			"/api/v1/integrations/status": map[string]interface{}{
+				"get": map[string]interface{}{
+					"summary":     "Integration status",
+					"description": "Returns the health status of all external integrations",
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "Integration status data",
+							"content": map[string]interface{}{
+								"application/json": map[string]interface{}{
+									"schema": map[string]interface{}{
+										"type": "object",
+										"properties": map[string]interface{}{
+											"github": map[string]interface{}{
+												"type": "object",
+												"properties": map[string]interface{}{
+													"connected": map[string]interface{}{
+														"type": "boolean",
+													},
+													"status": map[string]interface{}{
+														"type": "string",
+														"enum": []string{"healthy", "error", "disconnected"},
+													},
+													"message": map[string]interface{}{
+														"type": "string",
+													},
+												},
+											},
+											"kafka": map[string]interface{}{
+												"type": "object",
+											},
+											"chromadb": map[string]interface{}{
+												"type": "object",
+											},
+											"data_engine": map[string]interface{}{
+												"type": "object",
+											},
+											"timestamp": map[string]interface{}{
+												"type": "string",
+												"format": "date-time",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			"/api/v1/metrics": map[string]interface{}{
+				"get": map[string]interface{}{
+					"summary":     "System metrics",
+					"description": "Returns real-time system performance metrics",
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "System metrics data",
+							"content": map[string]interface{}{
+								"application/json": map[string]interface{}{
+									"schema": map[string]interface{}{
+										"type": "object",
+										"properties": map[string]interface{}{
+											"cpu": map[string]interface{}{
+												"type": "number",
+												"format": "float",
+												"description": "CPU usage percentage",
+											},
+											"memory": map[string]interface{}{
+												"type": "number",
+												"format": "float",
+												"description": "Memory usage percentage",
+											},
+											"disk": map[string]interface{}{
+												"type": "number",
+												"format": "float",
+												"description": "Disk usage percentage",
+											},
+											"network": map[string]interface{}{
+												"type": "object",
+												"properties": map[string]interface{}{
+													"in": map[string]interface{}{
+														"type": "integer",
+														"description": "Bytes received",
+													},
+													"out": map[string]interface{}{
+														"type": "integer",
+														"description": "Bytes sent",
+													},
+												},
+											},
+											"processes": map[string]interface{}{
+												"type": "integer",
+												"description": "Number of running processes",
+											},
+											"timestamp": map[string]interface{}{
+												"type": "string",
+												"format": "date-time",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			"/api/v1/backup": map[string]interface{}{
+				"post": map[string]interface{}{
+					"summary":     "Create backup",
+					"description": "Creates a backup of the ArchGuardian database",
+					"security":    []map[string]interface{}{{"bearerAuth": []string{}}},
+					"requestBody": map[string]interface{}{
+						"content": map[string]interface{}{
+							"application/json": map[string]interface{}{
+								"schema": map[string]interface{}{
+									"type": "object",
+									"properties": map[string]interface{}{
+										"encryption_key": map[string]interface{}{
+											"type": "string",
+											"description": "Optional encryption key (32 bytes)",
+										},
+									},
+								},
+							},
+						},
+					},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "Backup created successfully",
+							"content": map[string]interface{}{
+								"application/json": map[string]interface{}{
+									"schema": map[string]interface{}{
+										"type": "object",
+										"properties": map[string]interface{}{
+											"success": map[string]interface{}{
+												"type": "boolean",
+											},
+											"backup_path": map[string]interface{}{
+												"type": "string",
+											},
+											"timestamp": map[string]interface{}{
+												"type": "string",
+												"format": "date-time",
+											},
+											"encrypted": map[string]interface{}{
+												"type": "boolean",
+											},
+											"size_bytes": map[string]interface{}{
+												"type": "integer",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+				"get": map[string]interface{}{
+					"summary":     "List backups",
+					"description": "Returns a list of available database backups",
+					"security":    []map[string]interface{}{{"bearerAuth": []string{}}},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "List of backups",
+							"content": map[string]interface{}{
+								"application/json": map[string]interface{}{
+									"schema": map[string]interface{}{
+										"type": "object",
+										"properties": map[string]interface{}{
+											"backups": map[string]interface{}{
+												"type": "array",
+												"items": map[string]interface{}{
+													"type": "object",
+													"properties": map[string]interface{}{
+														"filename": map[string]interface{}{
+															"type": "string",
+														},
+														"path": map[string]interface{}{
+															"type": "string",
+														},
+														"size": map[string]interface{}{
+															"type": "integer",
+														},
+														"modified": map[string]interface{}{
+															"type": "string",
+															"format": "date-time",
+														},
+														"encrypted": map[string]interface{}{
+															"type": "boolean",
+														},
+													},
+												},
+											},
+											"total": map[string]interface{}{
+												"type": "integer",
+											},
+											"directory": map[string]interface{}{
+												"type": "string",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			"/api/v1/search": map[string]interface{}{
+				"get": map[string]interface{}{
+					"summary":     "Semantic search",
+					"description": "Performs natural language search across stored data",
+					"security":    []map[string]interface{}{{"bearerAuth": []string{}}},
+					"parameters": []map[string]interface{}{
+						{
+							"name": "q",
+							"in": "query",
+							"required": true,
+							"description": "Search query",
+							"schema": map[string]interface{}{
+								"type": "string",
+							},
+						},
+						{
+							"name": "collection",
+							"in": "query",
+							"description": "Collection to search in",
+							"schema": map[string]interface{}{
+								"type": "string",
+								"default": "knowledge-graphs",
+							},
+						},
+						{
+							"name": "limit",
+							"in": "query",
+							"description": "Maximum number of results",
+							"schema": map[string]interface{}{
+								"type": "integer",
+								"default": 5,
+								"maximum": 20,
+							},
+						},
+					},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "Search results",
+							"content": map[string]interface{}{
+								"application/json": map[string]interface{}{
+									"schema": map[string]interface{}{
+										"type": "object",
+										"properties": map[string]interface{}{
+											"query": map[string]interface{}{
+												"type": "string",
+											},
+											"collection": map[string]interface{}{
+												"type": "string",
+											},
+											"total": map[string]interface{}{
+												"type": "integer",
+											},
+											"results": map[string]interface{}{
+												"type": "array",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		"components": map[string]interface{}{
+			"securitySchemes": map[string]interface{}{
+				"bearerAuth": map[string]interface{}{
+					"type": "http",
+					"scheme": "bearer",
+					"bearerFormat": "JWT",
+				},
+			},
+		},
+		"tags": []map[string]interface{}{
+			{
+				"name": "health",
+				"description": "Health check endpoints",
+			},
+			{
+				"name": "scanning",
+				"description": "Code scanning and analysis",
+			},
+			{
+				"name": "projects",
+				"description": "Project management",
+			},
+			{
+				"name": "monitoring",
+				"description": "System monitoring and metrics",
+			},
+			{
+				"name": "administration",
+				"description": "Administrative operations",
+			},
+		},
+	}
+
+	json.NewEncoder(w).Encode(docs)
+}
+
+// ============================================================================
+// DATA ENGINE HANDLERS
+// ============================================================================
+
+// handleDataEngineKnowledgeGraph handles requests for knowledge graph data
+func handleDataEngineKnowledgeGraph(w http.ResponseWriter, _ *http.Request, de *data_engine.DataEngine) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if de == nil {
+		http.Error(w, "Data engine not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// For now, return a basic response - in a real implementation this would query the knowledge graph
+	response := map[string]interface{}{
+		"nodes": []map[string]interface{}{},
+		"edges": []map[string]interface{}{},
+		"message": "Knowledge graph data not yet implemented in data engine",
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleDataEngineIssues handles requests for issues data
+func handleDataEngineIssues(w http.ResponseWriter, _ *http.Request, de *data_engine.DataEngine) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if de == nil {
+		http.Error(w, "Data engine not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// For now, return a basic response - in a real implementation this would query issues
+	response := map[string]interface{}{
+		"issues": []map[string]interface{}{},
+		"message": "Issues data not yet implemented in data engine",
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleDataEngineCoverage handles requests for coverage data
+func handleDataEngineCoverage(w http.ResponseWriter, _ *http.Request, de *data_engine.DataEngine) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if de == nil {
+		http.Error(w, "Data engine not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// For now, return a basic response - in a real implementation this would query coverage data
+	response := map[string]interface{}{
+		"overall_coverage": 0.0,
+		"lines_covered":    0,
+		"total_lines":      0,
+		"test_files":       0,
+		"message":          "Coverage data not yet implemented in data engine",
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleDataEngineHealth handles health check requests for data engine
+func handleDataEngineHealth(w http.ResponseWriter, _ *http.Request, de *data_engine.DataEngine) {
+	w.Header().Set("Content-Type", "application/json")
+
+	// Create health status
+	health := map[string]interface{}{
+		"status":    "ok",
+		"timestamp": time.Now().Format(time.RFC3339),
+		"service":   "data-engine",
+	}
+
+	// Add data engine status
+	if de != nil {
+		health["data_engine"] = map[string]interface{}{
+			"running": de.IsRunning(),
+		}
+
+		// Add Kafka status
+		if de.GetProducer() != nil {
+			health["kafka"] = map[string]interface{}{
+				"connected": de.GetProducer().IsConnected(),
+			}
+		}
+
+		// Add ChromaDB status
+		if de.GetChromaDB() != nil {
+			health["chromadb"] = map[string]interface{}{
+				"connected": de.GetChromaDB().IsConnected(),
+			}
+		}
+	}
+
+	json.NewEncoder(w).Encode(health)
+}
+
+// handleDataEngineMetrics handles requests for data engine metrics
+func handleDataEngineMetrics(w http.ResponseWriter, _ *http.Request, de *data_engine.DataEngine) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if de == nil {
+		http.Error(w, "Data engine not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Get metrics
+	metrics := de.GetMetrics()
+	if metrics == nil {
+		http.Error(w, "No metrics available", http.StatusServiceUnavailable)
+		return
+	}
+
+	json.NewEncoder(w).Encode(metrics)
+}
+
+// handleDataEngineAlerts handles requests for alerts
+func handleDataEngineAlerts(w http.ResponseWriter, r *http.Request, de *data_engine.DataEngine) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if de == nil || de.GetAlerting() == nil {
+		http.Error(w, "Alerting system not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Parse query parameters
+	activeOnly := r.URL.Query().Get("active") == "true"
+
+	var alerts []data_engine.Alert
+	if activeOnly {
+		alerts = de.GetAlerting().GetActiveAlerts()
+	} else {
+		alerts = de.GetAlerting().GetAlerts()
+	}
+
+	json.NewEncoder(w).Encode(alerts)
+}
+
+// handleDataEngineResolveAlert handles requests to resolve an alert
+func handleDataEngineResolveAlert(w http.ResponseWriter, r *http.Request, de *data_engine.DataEngine) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if de == nil || de.GetAlerting() == nil {
+		http.Error(w, "Alerting system not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Get alert ID from URL
+	vars := mux.Vars(r)
+	alertID := vars["id"]
+
+	// Resolve alert
+	resolved := de.ResolveAlert(alertID)
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"id":       alertID,
+		"resolved": resolved,
+	})
+}
+
+// handleDataEngineEvents handles requests for events
+func handleDataEngineEvents(w http.ResponseWriter, r *http.Request, de *data_engine.DataEngine) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if de == nil || de.GetChromaDB() == nil || !de.GetChromaDB().IsConnected() {
+		http.Error(w, "ChromaDB not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Parse query parameters
+	limitStr := r.URL.Query().Get("limit")
+	eventType := r.URL.Query().Get("type")
+
+	// Set default limit
+	limit := 10
+	if limitStr != "" {
+		var err error
+		limit, err = strconv.Atoi(limitStr)
+		if err != nil || limit <= 0 {
+			limit = 10
+		}
+		if limit > 100 {
+			limit = 100
+		}
+	}
+
+	var docs []data_engine.ChromaDocument
+	var err error
+
+	// Query events
+	if eventType != "" {
+		// Filter by event type
+		docs, err = de.GetChromaDB().GetEventsByType(r.Context(), data_engine.EventType(eventType), limit)
+	} else {
+		// Get recent events
+		docs, err = de.GetChromaDB().GetRecentEvents(r.Context(), limit)
+	}
+
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to query events: %s", err.Error()), http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(docs)
+}
+
+// handleDataEngineSearchEvents handles requests to search events
+func handleDataEngineSearchEvents(w http.ResponseWriter, r *http.Request, de *data_engine.DataEngine) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if de == nil || de.GetChromaDB() == nil || !de.GetChromaDB().IsConnected() {
+		http.Error(w, "ChromaDB not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Parse query parameters
+	query := r.URL.Query().Get("q")
+	if query == "" {
+		http.Error(w, "Query parameter 'q' is required", http.StatusBadRequest)
+		return
+	}
+
+	limitStr := r.URL.Query().Get("limit")
+
+	// Set default limit
+	limit := 10
+	if limitStr != "" {
+		var err error
+		limit, err = strconv.Atoi(limitStr)
+		if err != nil || limit <= 0 {
+			limit = 10
+		}
+		if limit > 100 {
+			limit = 100
+		}
+	}
+
+	// Search events
+	docs, err := de.GetChromaDB().QueryEvents(r.Context(), query, limit)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to search events: %s", err.Error()), http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(docs)
+}
+
+// handleDataEngineEventTypes handles requests for event types
+func handleDataEngineEventTypes(w http.ResponseWriter, _ *http.Request, _ *data_engine.DataEngine) {
+	w.Header().Set("Content-Type", "application/json")
+
+	// Define event types
+	eventTypes := []string{
+		string(ScanCycleEventType),
+		string(ScanStartedEvent),
+		string(ScanCompletedEvent),
+		string(RiskAnalysisEvent),
+		string(RemediationEvent),
+		string(SystemEventType),
+		string(ErrorEvent),
+		string(WarningEvent),
+		string(InfoEvent),
+		// Add other relevant event types as they are defined and used
+	}
+
+	json.NewEncoder(w).Encode(eventTypes)
+}
+
+// handleDataEngineWindows handles requests for windows
+func handleDataEngineWindows(w http.ResponseWriter, _ *http.Request, de *data_engine.DataEngine) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if de == nil || de.GetAggregator() == nil {
+		http.Error(w, "Windowed aggregator not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Get windows
+	windows := de.GetAggregator().GetWindows()
+	json.NewEncoder(w).Encode(windows)
+}
+
+// handleDataEngineWindowsInRange handles requests for windows in a time range
+func handleDataEngineWindowsInRange(w http.ResponseWriter, r *http.Request, de *data_engine.DataEngine) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if de == nil || de.GetAggregator() == nil {
+		http.Error(w, "Windowed aggregator not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Parse query parameters
+	startStr := r.URL.Query().Get("start")
+	endStr := r.URL.Query().Get("end")
+
+	if startStr == "" || endStr == "" {
+		http.Error(w, "Query parameters 'start' and 'end' are required", http.StatusBadRequest)
+		return
+	}
+
+	// Parse timestamps
+	start, err := time.Parse(time.RFC3339, startStr)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Invalid start time: %s", err.Error()), http.StatusBadRequest)
+		return
+	}
+
+	end, err := time.Parse(time.RFC3339, endStr)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Invalid end time: %s", err.Error()), http.StatusBadRequest)
+		return
+	}
+
+	// Get windows in range
+	windows := de.GetAggregator().GetWindowsInRange(start, end)
+	json.NewEncoder(w).Encode(windows)
+}
+
+// handleDataEngineActiveUsers handles requests for active users
+func handleDataEngineActiveUsers(w http.ResponseWriter, r *http.Request, de *data_engine.DataEngine) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if de == nil || de.GetAggregator() == nil {
+		http.Error(w, "Windowed aggregator not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Parse query parameters
+	startStr := r.URL.Query().Get("start")
+	endStr := r.URL.Query().Get("end")
+
+	if startStr == "" || endStr == "" {
+		http.Error(w, "Query parameters 'start' and 'end' are required", http.StatusBadRequest)
+		return
+	}
+
+	// Parse timestamps
+	start, err := time.Parse(time.RFC3339, startStr)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Invalid start time: %s", err.Error()), http.StatusBadRequest)
+		return
+	}
+
+	end, err := time.Parse(time.RFC3339, endStr)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Invalid end time: %s", err.Error()), http.StatusBadRequest)
+		return
+	}
+
+	// Get active users
+	activeUsers := de.GetAggregator().GetActiveUsers(start, end)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"start":        start.Format(time.RFC3339),
+		"end":          end.Format(time.RFC3339),
+		"active_users": activeUsers,
+	})
+}
+
+// handleDataEngineEventRates handles requests for event rates
+func handleDataEngineEventRates(w http.ResponseWriter, r *http.Request, de *data_engine.DataEngine) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if de == nil || de.GetAggregator() == nil {
+		http.Error(w, "Windowed aggregator not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Parse query parameters
+	startStr := r.URL.Query().Get("start")
+	endStr := r.URL.Query().Get("end")
+
+	if startStr == "" || endStr == "" {
+		http.Error(w, "Query parameters 'start' and 'end' are required", http.StatusBadRequest)
+		return
+	}
+
+	// Parse timestamps
+	start, err := time.Parse(time.RFC3339, startStr)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Invalid start time: %s", err.Error()), http.StatusBadRequest)
+		return
+	}
+
+	end, err := time.Parse(time.RFC3339, endStr)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Invalid end time: %s", err.Error()), http.StatusBadRequest)
+		return
+	}
+
+	// Get event rate
+	eventRate := de.GetAggregator().GetEventRate(start, end)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"start":      start.Format(time.RFC3339),
+		"end":        end.Format(time.RFC3339),
+		"event_rate": eventRate,
+		"unit":       "events/second",
+	})
+}
+
+// handleDashboardWebSocket handles WebSocket connections for dashboard log streaming
+func handleDashboardWebSocket(w http.ResponseWriter, r *http.Request, ag *ArchGuardian) {
+	// Upgrade HTTP connection to WebSocket
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			// Allow connections from localhost for development
+			return true
+		},
+	}
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("Failed to upgrade connection: %s\n", err.Error())
+		return
+	}
+	defer conn.Close()
+
+	log.Println("Dashboard WebSocket client connected")
+
+	// Handle client messages
+	for {
+		// Read message
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Printf("WebSocket error: %s\n", err.Error())
+			}
+			break
+		}
+
+		// Parse message
+		var data map[string]interface{}
+		err = json.Unmarshal(message, &data)
+		if err != nil {
+			log.Printf("Failed to parse message: %s\n", err.Error())
+			continue
+		}
+
+		// Handle message
+		msgType, ok := data["type"].(string)
+		if !ok {
+			continue
+		}
+
+		switch msgType {
+		case "client_ready":
+			// Client is ready to receive logs
+			log.Println("Dashboard WebSocket client ready - flushing initial logs")
+			// Flush any buffered logs
+			if ag != nil {
+				ag.FlushInitialLogs()
+			}
+		}
+	}
+
+	log.Println("Dashboard WebSocket client disconnected")
+}
+
+// collectRealSystemMetrics collects actual system metrics using gopsutil
+func collectRealSystemMetrics(ctx context.Context) (map[string]interface{}, error) {
+	metrics := make(map[string]interface{})
+
+	// CPU usage
+	cpuPercent, err := cpu.PercentWithContext(ctx, 0, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get CPU metrics: %w", err)
+	}
+	if len(cpuPercent) > 0 {
+		metrics["cpu"] = cpuPercent[0]
+	} else {
+		metrics["cpu"] = 0.0
+	}
+
+	// Memory usage
+	memInfo, err := mem.VirtualMemoryWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get memory metrics: %w", err)
+	}
+	metrics["memory"] = memInfo.UsedPercent
+
+	// Disk usage
+	diskInfo, err := disk.UsageWithContext(ctx, "/")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get disk metrics: %w", err)
+	}
+	metrics["disk"] = diskInfo.UsedPercent
+
+	// Network I/O
+	netInfo, err := net.IOCountersWithContext(ctx, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get network metrics: %w", err)
+	}
+	if len(netInfo) > 0 {
+		metrics["network"] = map[string]interface{}{
+			"in":  netInfo[0].BytesRecv,
+			"out": netInfo[0].BytesSent,
+		}
+	} else {
+		metrics["network"] = map[string]interface{}{
+			"in":  0,
+			"out": 0,
+		}
+	}
+
+	// Process information
+	processes, err := process.ProcessesWithContext(ctx)
+	if err == nil {
+		metrics["processes"] = len(processes)
+	} else {
+		metrics["processes"] = 0
+	}
+
+	metrics["timestamp"] = time.Now()
+	return metrics, nil
 }

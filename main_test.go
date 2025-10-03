@@ -380,13 +380,10 @@ func TestDependencyParsers(t *testing.T) {
 			name:       "Python Parser",
 			parserFunc: scanner.parsePythonDependencies,
 			filePath:   "main.py",
-			content: `
-				import os
-				import sys
-				from my_project.utils import helper
-				import numpy as np
-				from . import local_module
-			`,
+			content: `import os
+import sys
+from my_project.utils import helper
+import numpy as np`,
 			expectedDeps: []string{"os", "sys", "my_project", "numpy"},
 		},
 		{

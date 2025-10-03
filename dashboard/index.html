@@ -16,20 +16,51 @@
                 <h1>🛡️ ArchGuardian</h1>
             </div>
             <div class="nav-links">
-                <button class="nav-btn active" data-view="overview">Overview</button>
-                <button class="nav-btn" data-view="graph">Knowledge Graph</button>
+                <button class="nav-btn active" data-view="console">Console</button>
                 <button class="nav-btn" data-view="projects">Projects</button>
+                <button class="nav-btn" data-view="overview">Overview</button>
+                <button class="nav-btn" data-view="graph">Knowledge Graph</button>
                 <button class="nav-btn" data-view="issues">Issues</button>
                 <button class="nav-btn" data-view="coverage">Coverage</button>
                 <button class="nav-btn" data-view="integrations">Integrations</button>
                 <button class="nav-btn" data-view="settings">Settings</button>
+                <div class="theme-toggle">
+                    <button id="theme-toggle" class="theme-toggle-btn" title="Toggle theme">
+                        <span class="theme-icon">🌙</span>
+                    </button>
+                </div>
             </div>
         </nav>
 
         <!-- Main Content -->
         <main class="main-content">
+            <!-- Console View -->
+            <div id="console-view" class="view active">
+                <div class="console-layout">
+                    <div class="console-output-container">
+                        <div class="console-header">
+                            <h3>System Log</h3>
+                            <button class="console-clear-btn" onclick="window.dashboard.clearConsole()">Clear</button>
+                        </div>
+                        <pre id="console-output" class="console-output"></pre>
+                    </div>
+                    <div class="console-sidebar">
+                        <div class="endpoints-card">
+                            <h3>Available Endpoints</h3>
+                            <ul class="endpoints-list">
+                                <li><span>Dashboard:</span> <a href="http://localhost:3000" target="_blank">http://localhost:3000</a></li>
+                                <li><span>Dashboard API:</span> <a href="http://localhost:3000/api/v1/" target="_blank">/api/v1/*</a></li>
+                                <li><span>Data Engine API:</span> <a href="http://localhost:3000/api/v1/data/" target="_blank">/api/v1/data/*</a></li>
+                                <li><span>WebSocket:</span> <span>ws://localhost:3000/ws</span></li>
+                                <li><span>Log Ingestion:</span> <a href="http://localhost:3000/api/v1/logs" target="_blank">/api/v1/logs</a></li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <!-- Overview View -->
-            <div id="overview-view" class="view active">
+            <div id="overview-view" class="view">
                 <div class="stats-grid">
                     <div class="stat-card">
                         <h3>Risk Score</h3>
@@ -105,15 +136,86 @@
                     </div>
                     <div class="add-project-card">
                         <h3>Connect New Project</h3>
-                        <div class="setting-item">
-                            <label for="project-type">Connection Type:</label>
-                            <select id="project-type">
-                                <option value="local">Local Folder</option>
-                                <option value="github">GitHub Repository</option>
-                            </select>
+                        <div class="connection-tabs">
+                            <button class="connection-tab active" data-tab="local">Local Folder</button>
+                            <button class="connection-tab" data-tab="github">GitHub Repository</button>
                         </div>
-                        <input type="text" id="project-path" placeholder="Enter local path or GitHub URL">
-                        <button class="save-btn" onclick="window.dashboard.addProject()">Connect Project</button>
+
+                        <!-- Local Folder Connection -->
+                        <div id="local-connection" class="connection-panel active">
+                            <div class="folder-selection">
+                                <label>Project Folder:</label>
+                                <div class="folder-input-group">
+                                    <input type="text" id="local-folder-path" placeholder="Select a folder..." readonly>
+                                    <button class="folder-btn" onclick="window.dashboard.selectFolder()">Browse...</button>
+                                </div>
+                            </div>
+                            <div class="project-settings">
+                                <div class="setting-item">
+                                    <label for="project-name">Project Name:</label>
+                                    <input type="text" id="project-name" placeholder="Auto-detected from folder">
+                                </div>
+                                <div class="setting-item">
+                                    <label for="scan-depth">Scan Depth:</label>
+                                    <select id="scan-depth">
+                                        <option value="shallow">Shallow (fast)</option>
+                                        <option value="deep" selected>Deep (comprehensive)</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <button class="connect-btn" onclick="window.dashboard.connectLocalProject()">Connect Local Project</button>
+                        </div>
+
+                        <!-- GitHub Repository Connection -->
+                        <div id="github-connection" class="connection-panel">
+                            <div class="github-auth-section">
+                                <div class="auth-status" id="github-auth-status">
+                                    <span class="auth-indicator"></span>
+                                    <span>Not authenticated</span>
+                                </div>
+                                <button class="auth-btn" onclick="window.dashboard.authenticateGitHub()">Authenticate with GitHub</button>
+                            </div>
+
+                            <div class="repo-selection">
+                                <div class="setting-item">
+                                    <label for="github-owner">Repository Owner:</label>
+                                    <input type="text" id="github-owner" placeholder="username or organization">
+                                </div>
+                                <div class="setting-item">
+                                    <label for="github-repo">Repository Name:</label>
+                                    <input type="text" id="github-repo" placeholder="repository name">
+                                </div>
+                                <div class="setting-item">
+                                    <label for="github-branch">Branch:</label>
+                                    <input type="text" id="github-branch" value="main" placeholder="main">
+                                </div>
+                            </div>
+
+                            <div class="github-settings">
+                                <div class="setting-item">
+                                    <label>
+                                        <input type="checkbox" id="github-include-prs" checked>
+                                        Include Pull Requests
+                                    </label>
+                                </div>
+                                <div class="setting-item">
+                                    <label>
+                                        <input type="checkbox" id="github-include-issues" checked>
+                                        Include Issues
+                                    </label>
+                                </div>
+                                <div class="setting-item">
+                                    <label>
+                                        <input type="checkbox" id="github-watch-releases">
+                                        Watch for Releases
+                                    </label>
+                                </div>
+                            </div>
+
+                            <button class="connect-btn github-connect-btn" onclick="window.dashboard.connectGitHubProject()" disabled>
+                                Connect GitHub Repository
+                            </button>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -231,6 +333,6 @@
         </main>
     </div>
 
-    <script src="app.js"></script>
+    <script src="app.js?v=1.0.1"></script>
 </body>
 </html>

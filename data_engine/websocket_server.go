@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -72,7 +73,7 @@ func (s *WebSocketServer) Start() error {
 
 	// Create HTTP server
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", s.handleWebSocket)
+	mux.HandleFunc("/ws", s.HandleWebSocket)
 	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/alerts", s.handleAlerts)
 	mux.HandleFunc("/events", s.handleEvents)
@@ -163,8 +164,8 @@ func (s *WebSocketServer) Stop() error {
 	return nil
 }
 
-// handleWebSocket handles WebSocket connections
-func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+// HandleWebSocket handles WebSocket connections
+func (s *WebSocketServer) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Upgrade HTTP connection to WebSocket
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -302,6 +303,14 @@ func (s *WebSocketServer) handleClientMessage(conn *websocket.Conn, data map[str
 		})
 		if err != nil {
 			fmt.Printf("Failed to send alert resolution response: %s\n", err.Error())
+		}
+	}
+
+	// Handle client ready message to flush initial logs
+	if msgType == "client_ready" {
+		log.Println("Client ready message received - flushing initial logs")
+		if s.dataEngine != nil {
+			s.dataEngine.TriggerClientReady()
 		}
 	}
 }
@@ -484,6 +493,39 @@ func (s *WebSocketServer) Broadcast(message interface{}) {
 		// Channel is full, log and continue
 		fmt.Printf("Broadcast channel is full, dropping message\n")
 	}
+}
+
+// BroadcastSecurityVulnerability broadcasts a security vulnerability found event
+func (s *WebSocketServer) BroadcastSecurityVulnerability(vuln interface{}) {
+	message := map[string]interface{}{
+		"type":      "security_vulnerability_found",
+		"timestamp": time.Now(),
+		"data":      vuln,
+	}
+	s.Broadcast(message)
+}
+
+// BroadcastRemediationCompleted broadcasts a remediation completed event
+func (s *WebSocketServer) BroadcastRemediationCompleted(result interface{}) {
+	message := map[string]interface{}{
+		"type":      "remediation_completed",
+		"timestamp": time.Now(),
+		"data":      result,
+	}
+	s.Broadcast(message)
+}
+
+// BroadcastLog broadcasts a log message
+func (s *WebSocketServer) BroadcastLog(logMessage string) {
+	message := map[string]interface{}{
+		"type":      "log",
+		"timestamp": time.Now(),
+		"data": map[string]interface{}{
+			"message": logMessage,
+			"level":   "info",
+		},
+	}
+	s.Broadcast(message)
 }
 
 // GetClientCount returns the number of connected clients

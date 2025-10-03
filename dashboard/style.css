@@ -1,6 +1,7 @@
 /* ArchGuardian Dashboard Styles */
 
 :root {
+    /* Light theme (default) */
     --primary-color: #2563eb;
     --secondary-color: #64748b;
     --success-color: #10b981;
@@ -13,6 +14,22 @@
     --border-color: #e2e8f0;
     --shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
     --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+}
+
+[data-theme="dark"] {
+    /* Dark theme matching website design system */
+    --primary-color: hsl(271, 91%, 65%);
+    --secondary-color: hsl(217, 33%, 17%);
+    --success-color: hsl(142, 76%, 36%);
+    --warning-color: hsl(38, 92%, 50%);
+    --error-color: hsl(0, 84%, 60%);
+    --background-color: hsl(222, 47%, 5%);
+    --card-background: hsl(222, 47%, 8%);
+    --text-primary: hsl(210, 40%, 98%);
+    --text-secondary: hsl(215, 20%, 65%);
+    --border-color: hsl(217, 33%, 17%);
+    --shadow: 0 1px 3px 0 rgb(0 0 0 / 0.3), 0 1px 2px -1px rgb(0 0 0 / 0.3);
+    --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.3), 0 4px 6px -4px rgb(0 0 0 / 0.3);
 }
 
 * {
@@ -64,6 +81,7 @@ body {
     cursor: pointer;
     transition: all 0.2s;
     font-size: 0.875rem;
+    color: var(--text-primary);
 }
 
 .nav-btn:hover {
@@ -219,6 +237,7 @@ body {
     border-radius: 0.5rem;
     cursor: pointer;
     transition: all 0.2s;
+    color: var(--text-primary);
 }
 
 .control-btn:hover {
@@ -232,6 +251,78 @@ body {
     height: 600px;
     padding: 1rem;
     box-shadow: var(--shadow);
+}
+
+/* Console View */
+.console-layout {
+    display: grid;
+    grid-template-columns: 3fr 1fr;
+    gap: 1.5rem;
+    height: calc(100vh - 120px); /* Adjust based on navbar height */
+}
+
+.console-output-container {
+    display: flex;
+    flex-direction: column;
+    background: var(--card-background);
+    border: 1px solid var(--border-color);
+    border-radius: 0.75rem;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+}
+
+.console-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 1.5rem;
+    border-bottom: 1px solid var(--border-color);
+    background: var(--background-color);
+}
+
+.console-header h3 {
+    font-size: 1rem;
+    font-weight: 600;
+}
+
+.console-clear-btn {
+    background: var(--primary-color);
+    color: white;
+    border: none;
+    padding: 0.25rem 0.75rem;
+    border-radius: 0.5rem;
+    cursor: pointer;
+    font-size: 0.8rem;
+}
+
+.console-output {
+    flex: 1;
+    padding: 1rem;
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    color: var(--text-secondary);
+}
+
+.console-sidebar .endpoints-card {
+    background: var(--card-background);
+    border: 1px solid var(--border-color);
+    border-radius: 0.75rem;
+    padding: 1.5rem;
+    box-shadow: var(--shadow);
+}
+
+.endpoints-card h3 {
+    margin-bottom: 1rem;
+}
+
+.endpoints-list li {
+    list-style: none;
+    margin-bottom: 0.75rem;
+    font-size: 0.875rem;
 }
 
 /* Issues View */
@@ -282,6 +373,7 @@ body {
     cursor: pointer;
     border-bottom: 2px solid transparent;
     transition: all 0.2s;
+    color: var(--text-primary);
 }
 
 .tab-btn.active {
@@ -485,6 +577,196 @@ body {
     background: #d97706;
 }
 
+/* Project Connection Styles */
+.connection-tabs {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 1.5rem;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.connection-tab {
+    background: none;
+    border: none;
+    padding: 0.75rem 1rem;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: all 0.2s;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.connection-tab.active {
+    color: var(--primary-color);
+    border-bottom-color: var(--primary-color);
+}
+
+.connection-tab:not(.active):hover {
+    background: var(--background-color);
+}
+
+.connection-panel {
+    display: none;
+}
+
+.connection-panel.active {
+    display: block;
+}
+
+.folder-selection {
+    margin-bottom: 1.5rem;
+}
+
+.folder-selection label {
+    display: block;
+    margin-bottom: 0.5rem;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.folder-input-group {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.folder-input-group input {
+    flex: 1;
+    padding: 0.75rem;
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+    font-size: 0.875rem;
+    background: var(--card-background);
+}
+
+.folder-btn {
+    background: var(--primary-color);
+    color: white;
+    border: none;
+    padding: 0.75rem 1rem;
+    border-radius: 0.5rem;
+    cursor: pointer;
+    font-weight: 500;
+    transition: background 0.2s;
+    white-space: nowrap;
+}
+
+.folder-btn:hover {
+    background: #1d4ed8;
+}
+
+.project-settings {
+    margin-bottom: 1.5rem;
+}
+
+.github-auth-section {
+    background: var(--background-color);
+    padding: 1rem;
+    border-radius: 0.5rem;
+    margin-bottom: 1.5rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.auth-status {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.875rem;
+}
+
+.auth-indicator {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #ef4444;
+    display: inline-block;
+}
+
+.auth-indicator.connected {
+    background: var(--success-color);
+}
+
+.auth-btn {
+    background: #24292e;
+    color: white;
+    border: none;
+    padding: 0.5rem 1rem;
+    border-radius: 0.5rem;
+    cursor: pointer;
+    font-size: 0.875rem;
+    font-weight: 500;
+    transition: background 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.auth-btn:hover {
+    background: #1a1e22;
+}
+
+.auth-btn::before {
+    content: "🔗";
+    font-size: 1rem;
+}
+
+.repo-selection, .github-settings {
+    margin-bottom: 1.5rem;
+}
+
+.github-settings {
+    background: var(--background-color);
+    padding: 1rem;
+    border-radius: 0.5rem;
+}
+
+.github-settings .setting-item {
+    margin-bottom: 0.75rem;
+}
+
+.github-settings .setting-item:last-child {
+    margin-bottom: 0;
+}
+
+.github-settings label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    font-weight: 500;
+}
+
+.github-settings input[type="checkbox"] {
+    width: auto;
+    margin: 0;
+}
+
+.connect-btn {
+    width: 100%;
+    background: var(--success-color);
+    color: white;
+    border: none;
+    padding: 0.75rem;
+    border-radius: 0.5rem;
+    cursor: pointer;
+    font-weight: 500;
+    transition: background 0.2s;
+}
+
+.connect-btn:hover {
+    background: #059669;
+}
+
+.github-connect-btn:disabled {
+    background: var(--text-secondary);
+    cursor: not-allowed;
+}
+
+.github-connect-btn:not(:disabled):hover {
+    background: #059669;
+}
+
 /* Responsive Design */
 @media (max-width: 768px) {
     .navbar {
@@ -515,6 +797,16 @@ body {
     .graph-container {
         height: 400px;
     }
+
+    .github-auth-section {
+        flex-direction: column;
+        gap: 1rem;
+        align-items: stretch;
+    }
+
+    .folder-input-group {
+        flex-direction: column;
+    }
 }
 
 /* Status indicators */
@@ -531,4 +823,89 @@ body {
 .status-item:has-text("❌") {
     background: #fee2e2;
     color: #991b1b;
+}
+
+/* Theme Toggle Styles */
+.theme-toggle {
+    margin-left: 1rem;
+    display: flex;
+    align-items: center;
+}
+
+.theme-toggle-btn {
+    background: var(--card-background);
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+    padding: 0.5rem;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.5rem;
+    height: 2.5rem;
+}
+
+.theme-toggle-btn:hover {
+    background: var(--background-color);
+    transform: scale(1.05);
+}
+
+.theme-toggle-btn:active {
+    transform: scale(0.95);
+}
+
+.theme-icon {
+    font-size: 1rem;
+    transition: transform 0.3s ease;
+}
+
+[data-theme="dark"] .theme-icon {
+    transform: rotate(180deg);
+}
+
+/* Dark theme specific adjustments */
+[data-theme="dark"] .activity-item {
+    background: hsl(217, 33%, 17%);
+}
+
+[data-theme="dark"] .console-header {
+    background: hsl(222, 47%, 11%);
+}
+
+[data-theme="dark"] .github-auth-section,
+[data-theme="dark"] .github-settings {
+    background: hsl(217, 33%, 17%);
+}
+
+[data-theme="dark"] .folder-input-group input {
+    background: hsl(217, 33%, 17%);
+    color: hsl(210, 40%, 98%);
+    border-color: hsl(217, 33%, 20%);
+}
+
+[data-theme="dark"] .setting-item input,
+[data-theme="dark"] .setting-item select {
+    background: hsl(217, 33%, 17%);
+    color: hsl(210, 40%, 98%);
+    border-color: hsl(217, 33%, 20%);
+}
+
+[data-theme="dark"] .github-settings label {
+    color: hsl(210, 40%, 98%);
+}
+
+[data-theme="dark"] .status-item:has-text("✅") {
+    background: hsl(142, 76%, 36%, 0.2);
+    color: hsl(142, 76%, 70%);
+}
+
+[data-theme="dark"] .status-item:has-text("⚠️") {
+    background: hsl(38, 92%, 50%, 0.2);
+    color: hsl(38, 92%, 70%);
+}
+
+[data-theme="dark"] .status-item:has-text("❌") {
+    background: hsl(0, 84%, 60%, 0.2);
+    color: hsl(0, 84%, 80%);
 }

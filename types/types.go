@@ -1,6 +1,12 @@
 package types
 
-import "time"
+import (
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/philippgille/chromem-go"
+)
 
 // ============================================================================
 // KNOWLEDGE GRAPH
@@ -11,6 +17,56 @@ type KnowledgeGraph struct {
 	Edges         []*Edge
 	LastUpdated   time.Time
 	AnalysisDepth int
+}
+
+// ToAPIFormat converts the KnowledgeGraph to the format expected by the frontend
+func (kg *KnowledgeGraph) ToAPIFormat() map[string]interface{} {
+	nodes := make([]map[string]interface{}, 0, len(kg.Nodes))
+	for _, node := range kg.Nodes {
+		nodes = append(nodes, map[string]interface{}{
+			"id":       node.ID,
+			"label":    node.Name,
+			"type":     string(node.Type),
+			"group":    string(node.Type),
+			"metadata": node.Metadata,
+		})
+	}
+
+	edges := make([]map[string]interface{}, 0, len(kg.Edges))
+	for _, edge := range kg.Edges {
+		edges = append(edges, map[string]interface{}{
+			"from":   edge.From,
+			"to":     edge.To,
+			"label":  edge.Relationship,
+			"arrows": "to",
+		})
+	}
+
+	return map[string]interface{}{
+		"nodes": nodes,
+		"edges": edges,
+	}
+}
+
+// ToDocument converts the KnowledgeGraph to a chromem-go document for persistence
+func (kg *KnowledgeGraph) ToDocument(projectID string) (chromem.Document, error) {
+	graphJSON, err := json.Marshal(kg.ToAPIFormat())
+	if err != nil {
+		return chromem.Document{}, err
+	}
+
+	return chromem.Document{
+		ID:      "kg_" + projectID + "_" + kg.LastUpdated.Format("20060102_150405"),
+		Content: string(graphJSON),
+		Metadata: map[string]string{
+			"type":           "knowledge-graph",
+			"project_id":     projectID,
+			"timestamp":      kg.LastUpdated.Format(time.RFC3339),
+			"node_count":     fmt.Sprintf("%d", len(kg.Nodes)),
+			"edge_count":     fmt.Sprintf("%d", len(kg.Edges)),
+			"analysis_depth": fmt.Sprintf("%d", kg.AnalysisDepth),
+		},
+	}, nil
 }
 
 type Node struct {
@@ -59,6 +115,29 @@ type RiskAssessment struct {
 	DangerousDependencies []DependencyRisk
 	OverallScore          float64
 	Timestamp             time.Time
+}
+
+// ToDocument converts the RiskAssessment to a chromem-go document for persistence
+func (ra *RiskAssessment) ToDocument(projectID string) (chromem.Document, error) {
+	assessmentJSON, err := json.Marshal(ra)
+	if err != nil {
+		return chromem.Document{}, err
+	}
+
+	return chromem.Document{
+		ID:      "assessment_" + projectID + "_" + ra.Timestamp.Format("20060102_150405"),
+		Content: string(assessmentJSON),
+		Metadata: map[string]string{
+			"type":                "risk-assessment",
+			"project_id":          projectID,
+			"timestamp":           ra.Timestamp.Format(time.RFC3339),
+			"overall_score":       fmt.Sprintf("%.2f", ra.OverallScore),
+			"technical_debt_count": fmt.Sprintf("%d", len(ra.TechnicalDebt)),
+			"security_vulns_count": fmt.Sprintf("%d", len(ra.SecurityVulns)),
+			"obsolete_code_count": fmt.Sprintf("%d", len(ra.ObsoleteCode)),
+			"dependency_risks_count": fmt.Sprintf("%d", len(ra.DangerousDependencies)),
+		},
+	}, nil
 }
 
 type TechnicalDebtItem struct {

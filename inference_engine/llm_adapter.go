@@ -1,6 +1,5 @@
 package inference_engine
 
-
 import (
 	"context"
 
@@ -11,6 +10,14 @@ import (
 type LLMAdapter struct {
 	LLM          llm.LLM
 	ProviderName string // ADDED: Store the provider name
+}
+
+// NewLLMAdapter creates a new LLMAdapter instance
+func NewLLMAdapter(llmInstance llm.LLM, providerName string) *LLMAdapter {
+	return &LLMAdapter{
+		LLM:          llmInstance,
+		ProviderName: providerName,
+	}
 }
 
 // GenerateText implements the TextGenerator interface

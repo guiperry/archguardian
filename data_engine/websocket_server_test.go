@@ -127,7 +127,7 @@ func TestWebSocketServerWithDataEngine(t *testing.T) {
 
 	// Create a test server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		wsServer.handleWebSocket(w, r)
+		wsServer.HandleWebSocket(w, r)
 	}))
 	defer server.Close()
 

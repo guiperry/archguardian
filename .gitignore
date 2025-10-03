@@ -29,3 +29,6 @@ dist-ssr
 *.sw?
 .env
 
+archguardian
+/archguardian-data
+.zencoder/
