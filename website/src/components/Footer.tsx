@@ -1,4 +1,5 @@
-import { Shield, Github, Twitter, Mail } from "lucide-react";
+import { Github, Twitter, Mail } from "lucide-react";
+import logo from "@/assets/logo.png";
 
 const Footer = () => {
   return (
@@ -7,7 +8,7 @@ const Footer = () => {
         <div className="grid md:grid-cols-4 gap-8 mb-8">
           <div className="space-y-4">
             <div className="flex items-center gap-2">
-              <Shield className="h-6 w-6 text-primary" />
+              <img src={logo} alt="ArchGuardian Logo" className="h-6 w-6" />
               <span className="font-bold text-lg">ArchGuardian</span>
             </div>
             <p className="text-sm text-muted-foreground">
@@ -28,8 +29,8 @@ const Footer = () => {
           <div>
             <h3 className="font-semibold mb-4">Resources</h3>
             <ul className="space-y-2 text-sm text-muted-foreground">
-              <li><a href="#" className="hover:text-foreground transition-colors">Documentation</a></li>
-              <li><a href="#" className="hover:text-foreground transition-colors">API Reference</a></li>
+              <li><a href="https://github.com/guiperry/archguardian/wiki" className="hover:text-foreground transition-colors">Documentation</a></li>
+              <li><a href="https://github.com/guiperry/archguardian/wiki" className="hover:text-foreground transition-colors">API Reference</a></li>
               <li><a href="#" className="hover:text-foreground transition-colors">Examples</a></li>
               <li><a href="#" className="hover:text-foreground transition-colors">Blog</a></li>
             </ul>
@@ -38,10 +39,10 @@ const Footer = () => {
           <div>
             <h3 className="font-semibold mb-4">Connect</h3>
             <div className="flex gap-4">
-              <a href="#" className="w-10 h-10 rounded-lg bg-muted/50 flex items-center justify-center hover:bg-primary/20 transition-colors">
+              <a href="https://github.com/guiperry/archguardian/" className="w-10 h-10 rounded-lg bg-muted/50 flex items-center justify-center hover:bg-primary/20 transition-colors">
                 <Github className="h-5 w-5" />
               </a>
-              <a href="#" className="w-10 h-10 rounded-lg bg-muted/50 flex items-center justify-center hover:bg-primary/20 transition-colors">
+              <a href="@G_Perry100" className="w-10 h-10 rounded-lg bg-muted/50 flex items-center justify-center hover:bg-primary/20 transition-colors">
                 <Twitter className="h-5 w-5" />
               </a>
               <a href="#" className="w-10 h-10 rounded-lg bg-muted/50 flex items-center justify-center hover:bg-primary/20 transition-colors">
@@ -56,9 +57,9 @@ const Footer = () => {
             © 2025 ArchGuardian. All rights reserved.
           </p>
           <div className="flex gap-6 text-sm text-muted-foreground">
-            <a href="#" className="hover:text-foreground transition-colors">Privacy</a>
-            <a href="#" className="hover:text-foreground transition-colors">Terms</a>
-            <a href="#" className="hover:text-foreground transition-colors">Security</a>
+            <a href="https://github.com/guiperry/archguardian/VULNERABILITY_DISCLOSURE_POLICY.md" className="hover:text-foreground transition-colors">Privacy</a>
+            <a href="https://github.com/guiperry/archguardian/VULNERABILITY_DISCLOSURE_POLICY.md" className="hover:text-foreground transition-colors">Terms</a>
+            <a href="https://github.com/guiperry/archguardian/VULNERABILITY_DISCLOSURE_POLICY.md" className="hover:text-foreground transition-colors">Security</a>
           </div>
         </div>
       </div>

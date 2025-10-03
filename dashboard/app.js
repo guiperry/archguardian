@@ -9,6 +9,7 @@ class ArchGuardianDashboard {
         this.coverageDetailsChart = null;
         this.githubAuthenticated = false;
         this.currentTheme = 'light'; // Default theme
+        this.projectStarted = false; // Track if a project has been started
 
         this.init();
     }
@@ -169,9 +170,14 @@ class ArchGuardianDashboard {
                 <h4>${p.name}</h4>
                 <p class="project-path">${p.path}</p>
                 <div class="project-status">Status: <span class="status-${p.status.toLowerCase()}">${p.status}</span></div>
-                <button class="start-scan-btn" onclick="window.dashboard.startScan('${p.id}')" ${p.status === 'scanning' ? 'disabled' : ''}>
-                    ${p.status === 'scanning' ? 'Scanning...' : 'Start Scan'}
-                </button>
+                <div class="project-buttons">
+                    <button class="start-scan-btn" onclick="window.dashboard.startScan('${p.id}')" ${p.status === 'scanning' ? 'disabled' : ''}>
+                        ${p.status === 'scanning' ? 'Scanning...' : 'Start'}
+                    </button>
+                    <button class="stop-scan-btn" onclick="window.dashboard.stopScan('${p.id}')" ${p.status !== 'scanning' ? 'disabled' : ''}>
+                        Stop
+                    </button>
+                </div>
             </div>
         `).join('');
     }
@@ -207,10 +213,46 @@ class ArchGuardianDashboard {
     }
 
     async startScan(projectId) {
+        // Show the hidden navigation links when starting a scan
+        this.showHiddenNavigation();
+
         this.showNotification(`Starting scan for project...`, 'info');
+
+        // Trigger the scan via API
         await fetch(`http://localhost:3000/api/v1/projects/${projectId}/scan`, { method: 'POST' });
+
+        // Mark project as started
+        this.projectStarted = true;
+
         // The UI will be updated via WebSocket events, but we can also force a refresh
         setTimeout(() => this.loadProjects(), 1000);
+    }
+
+    async stopScan(projectId) {
+        this.showNotification(`Stopping scan for project...`, 'info');
+
+        // For now, we'll just show a notification since the backend doesn't have a stop endpoint
+        // In a real implementation, you would call an API endpoint to stop the scan
+        try {
+            // Try to call a stop endpoint if it exists
+            await fetch(`http://localhost:3000/api/v1/projects/${projectId}/stop`, { method: 'POST' });
+        } catch (error) {
+            // If stop endpoint doesn't exist, just show notification
+            console.log('Stop endpoint not available, scan will continue');
+        }
+
+        // Refresh projects list to update button states
+        setTimeout(() => this.loadProjects(), 1000);
+    }
+
+    showHiddenNavigation() {
+        // Show the previously hidden navigation buttons
+        const hiddenNavButtons = document.querySelectorAll('.hidden-nav');
+        hiddenNavButtons.forEach(button => {
+            button.style.display = 'block';
+        });
+
+        this.showNotification('Project started! Navigation links are now available.', 'success');
     }
 
     async loadKnowledgeGraph() {
@@ -646,6 +688,12 @@ class ArchGuardianDashboard {
     }
 
     async loadViewData(view) {
+        // Don't load data if no project has been started
+        if (!this.projectStarted) {
+            console.log(`Project not started yet, skipping data load for ${view} view`);
+            return;
+        }
+
         switch (view) {
             case 'issues':
                 this.loadIssuesData('technical-debt');
@@ -1145,7 +1193,50 @@ style.textContent = `
     .project-status .status-idle { color: var(--text-secondary); }
     .project-status .status-scanning { color: var(--primary-color); }
 
-    .start-scan-btn { width: 100%; margin-top: 1rem; }
+    .project-buttons {
+        display: flex;
+        gap: 0.5rem;
+        margin-top: 1rem;
+    }
+
+    .start-scan-btn, .stop-scan-btn {
+        flex: 1;
+        padding: 0.5rem 1rem;
+        border: none;
+        border-radius: 0.25rem;
+        font-size: 0.875rem;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+
+    .start-scan-btn {
+        background: var(--primary-color);
+        color: white;
+    }
+
+    .start-scan-btn:hover:not(:disabled) {
+        background: var(--primary-color-dark);
+    }
+
+    .start-scan-btn:disabled {
+        background: var(--text-secondary);
+        cursor: not-allowed;
+    }
+
+    .stop-scan-btn {
+        background: var(--error-color);
+        color: white;
+    }
+
+    .stop-scan-btn:hover:not(:disabled) {
+        background: #dc2626;
+    }
+
+    .stop-scan-btn:disabled {
+        background: var(--text-secondary);
+        cursor: not-allowed;
+    }
 
     .issue-item {
         background: var(--card-background);
@@ -1185,6 +1276,7 @@ window.saveSettings = function() { if (window.dashboard && typeof window.dashboa
 window.resetSettings = function() { if (window.dashboard && typeof window.dashboard.resetSettings === 'function') window.dashboard.resetSettings(); };
 window.selectFolder = function() { if (window.dashboard && typeof window.dashboard.selectFolder === 'function') window.dashboard.selectFolder(); };
 window.startScan = function(projectId) { if (window.dashboard && typeof window.dashboard.startScan === 'function') window.dashboard.startScan(projectId); };
+window.stopScan = function(projectId) { if (window.dashboard && typeof window.dashboard.stopScan === 'function') window.dashboard.stopScan(projectId); };
 window.connectLocalProject = function() { if (window.dashboard && typeof window.dashboard.connectLocalProject === 'function') window.dashboard.connectLocalProject(); };
 window.connectGitHubProject = function() { if (window.dashboard && typeof window.dashboard.connectGitHubProject === 'function') window.dashboard.connectGitHubProject(); };
 window.authenticateGitHub = function() { if (window.dashboard && typeof window.dashboard.authenticateGitHub === 'function') window.dashboard.authenticateGitHub(); };

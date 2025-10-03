@@ -6,7 +6,7 @@ ArchGuardian is a GoLang-based autonomous system that provides deep visibility i
 
 [![Go Version](https://img.shields.io/badge/Go-1.23.3-00ADD8?logo=go)](https://go.dev/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-production--ready-green.svg)](https://github.com/yourusername/archguardian)
+[![Status](https://img.shields.io/badge/status-production--ready-green.svg)](https://github.com/guiperry/archguardian)
 
 ---
 
@@ -802,9 +802,9 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📞 Support
 
-- **Documentation**: [Full documentation](https://github.com/yourusername/archguardian/wiki)
-- **Issues**: [GitHub Issues](https://github.com/yourusername/archguardian/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/yourusername/archguardian/discussions)
+- **Disclosure**: [Vulnerability Disclosure](https://github.com/guiperry/archguardian/VULNERABILITY_DISCLOSURE_POLICY.md)
+- **Documentation**: [Full documentation](https://github.com/guiperry/archguardian/wiki)
+- **Issues**: [GitHub Issues](https://github.com/guiperry/archguardian/issues)
 
 ---
 

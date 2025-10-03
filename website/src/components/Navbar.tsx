@@ -1,5 +1,5 @@
-import { Shield } from "lucide-react";
 import { Button } from "./ui/button";
+import logo from "@/assets/logo.png";
 
 const Navbar = () => {
   return (
@@ -7,7 +7,7 @@ const Navbar = () => {
       <div className="container mx-auto px-6 py-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <Shield className="h-8 w-8 text-primary" />
+            <img src={logo} alt="ArchGuardian Logo" className="h-8 w-8" />
             <span className="text-xl font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">
               ArchGuardian
             </span>
@@ -23,14 +23,22 @@ const Navbar = () => {
             <a href="#capabilities" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
               Capabilities
             </a>
+            <a href="#pricing" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
+              Pricing
+            </a>
           </div>
           
           <div className="flex items-center gap-4">
-            <Button variant="ghost" size="sm" className="hidden md:inline-flex">
+            <a
+              href="https://github.com/guiperry/archguardian/wiki"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hidden md:inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 hover:bg-accent hover:text-accent-foreground h-9 rounded-md px-3"
+            >
               Documentation
-            </Button>
-            <Button size="sm" className="bg-gradient-to-r from-primary to-accent hover:opacity-90 transition-opacity">
-              Get Started
+            </a>
+            <Button asChild size="sm" className="bg-gradient-to-r from-primary to-accent hover:opacity-90 transition-opacity">
+              <a href="#pricing">Get Started</a>
             </Button>
           </div>
         </div>

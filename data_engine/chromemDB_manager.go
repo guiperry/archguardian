@@ -266,6 +266,11 @@ func createEmbeddingFunction() func([]string) ([][]float64, error) {
 		}
 		req.Header.Set("Content-Type", "application/json")
 
+		// Add API key for authentication if available
+		if apiKey := os.Getenv("EMBEDDING_API_KEY"); apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+
 		// Make HTTP request
 		client := &http.Client{Timeout: 30 * time.Second}
 		resp, err := client.Do(req)
@@ -281,6 +286,9 @@ func createEmbeddingFunction() func([]string) ([][]float64, error) {
 		}
 
 		// Check status code
+		if resp.StatusCode == http.StatusUnauthorized {
+			return nil, fmt.Errorf("embedding service authentication failed (401 Unauthorized). Please check EMBEDDING_API_KEY environment variable")
+		}
 		if resp.StatusCode != http.StatusOK {
 			return nil, fmt.Errorf("embedding service returned status %d: %s", resp.StatusCode, string(body))
 		}

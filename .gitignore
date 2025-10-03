@@ -16,6 +16,7 @@ node_modules
 dist
 dist-ssr
 *.local
+build/
 
 # Editor directories and files
 .vscode/*
@@ -32,3 +33,4 @@ dist-ssr
 archguardian
 /archguardian-data
 .zencoder/
+docs/

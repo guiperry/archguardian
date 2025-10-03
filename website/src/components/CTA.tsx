@@ -29,9 +29,11 @@ const CTA = () => {
               </p>
               
               <div className="flex flex-col sm:flex-row gap-4 justify-center">
-                <Button size="lg" className="bg-gradient-to-r from-primary to-accent hover:opacity-90 transition-opacity group">
-                  Get Started Now
-                  <ArrowRight className="ml-2 h-5 w-5 group-hover:translate-x-1 transition-transform" />
+                <Button asChild size="lg" className="bg-gradient-to-r from-primary to-accent hover:opacity-90 transition-opacity group">
+                  <a href="#pricing">
+                    Get Started Now
+                    <ArrowRight className="ml-2 h-5 w-5 group-hover:translate-x-1 transition-transform" />
+                  </a>
                 </Button>
                 <Button size="lg" variant="outline" className="border-primary/50 hover:bg-primary/10">
                   Read Documentation

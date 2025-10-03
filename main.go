@@ -39,6 +39,9 @@ import (
 	"github.com/shirou/gopsutil/v4/process"
 )
 
+// Version is set at compile time
+var Version = "dev"
+
 // EventType represents different types of events that can be produced
 type EventType string
 
@@ -735,6 +738,10 @@ func (sm *SettingsManager) getDefaultSettings() *Config {
 				Endpoint: getEnv("DEEPSEEK_ENDPOINT", "https://api.deepseek.com/v1"),
 				Model:    getEnv("DEEPSEEK_MODEL", "deepseek-coder"),
 			},
+			Embedding: ProviderCredentials{
+				APIKey:   getEnv("EMBEDDING_API_KEY", ""),
+				Endpoint: getEnv("EMBEDDING_ENDPOINT", "https://embeddings.knirv.com"),
+			},
 			CodeRemediationProvider: getEnv("CODE_REMEDIATION_PROVIDER", "anthropic"),
 		},
 		Orchestrator: OrchestratorConfig{
@@ -764,6 +771,7 @@ type AIProviderConfig struct {
 	Anthropic ProviderCredentials // Code remediation
 	OpenAI    ProviderCredentials // Code remediation (fallback)
 	DeepSeek  ProviderCredentials // Code remediation (fallback)
+	Embedding ProviderCredentials // Embedding service for vector operations
 
 	CodeRemediationProvider string // "anthropic", "openai", or "deepseek"
 }
@@ -3993,6 +4001,10 @@ func main() {
 	log.Println("║          Deep Visibility • Risk Detection • Auto-Fix           ║")
 	log.Println("╚════════════════════════════════════════════════════════════════╝")
 
+	// The main function should be simplified to orchestrate the creation
+	// and startup of the application's components. Much of the logic
+	// currently here could be moved to dedicated packages.
+
 	// Load .env file if it exists
 	if err := godotenv.Load(); err != nil {
 		log.Println("⚠️  No .env file found or failed to load, using environment variables only")
@@ -4007,6 +4019,12 @@ func main() {
 	// Initialize environment manager for environment-specific configurations
 	envManager := NewEnvironmentManager()
 	log.Println("✅ Environment manager initialized")
+
+	// SUGGESTION: Consolidate configuration loading into a single function or package.
+	// This function would handle loading from .env, files, environment variables,
+	// and applying environment-specific overrides in a clear order of precedence.
+	// For example:
+	// config := config.Load()
 
 	// Load configuration from environment variables (base config)
 	config := &Config{
@@ -4165,6 +4183,11 @@ func main() {
 	// Start log ingestion server for external log streams
 	go func() {
 		if err := startLogIngestionServer(logAnalyzer); err != nil {
+			// This server has been consolidated into the main server on port 3000.
+			// This goroutine can be removed. The endpoint /api/v1/logs is handled
+			// by startConsolidatedServer.
+			// If a separate port is desired for log ingestion for scalability,
+			// it should be clearly documented and configured.
 			log.Printf("⚠️  Log ingestion server failed: %v", err)
 		}
 	}()
@@ -4218,9 +4241,25 @@ func (lw *logWriter) Write(p []byte) (n int, err error) {
 	lw.bufferMutex.Lock()
 	defer lw.bufferMutex.Unlock()
 
+	// Create JSON message for WebSocket
+	logMessage := map[string]interface{}{
+		"type": "log",
+		"data": map[string]interface{}{
+			"message": strings.TrimSpace(string(p)),
+			"level":   "info",
+		},
+		"timestamp": time.Now(),
+	}
+
+	jsonMessage, jsonErr := json.Marshal(logMessage)
+	if jsonErr != nil {
+		// If JSON marshaling fails, fall back to original behavior
+		jsonMessage = p
+	}
+
 	// If the client is ready, broadcast immediately.
 	if lw.clientReady && lw.ag != nil {
-		lw.ag.BroadcastToDashboard(string(p))
+		lw.ag.BroadcastToDashboard(string(jsonMessage))
 	} else {
 		// Otherwise, buffer the initial logs.
 		if lw.maxBufferSize == 0 {
@@ -4228,8 +4267,8 @@ func (lw *logWriter) Write(p []byte) (n int, err error) {
 		}
 		if len(lw.initialLogs) < lw.maxBufferSize {
 			// Create a copy of the byte slice to avoid data races
-			logCopy := make([]byte, len(p))
-			copy(logCopy, p)
+			logCopy := make([]byte, len(jsonMessage))
+			copy(logCopy, jsonMessage)
 			lw.initialLogs = append(lw.initialLogs, logCopy)
 		}
 	}
@@ -8047,6 +8086,12 @@ func handleDashboardWebSocket(w http.ResponseWriter, r *http.Request, ag *ArchGu
 
 	log.Println("Dashboard WebSocket client connected")
 
+	// Register the connection immediately after upgrade
+	if ag != nil {
+		ag.AddDashboardConnection(conn)
+		log.Printf("WebSocket connection registered with ArchGuardian")
+	}
+
 	// Handle client messages
 	for {
 		// Read message
@@ -8084,6 +8129,10 @@ func handleDashboardWebSocket(w http.ResponseWriter, r *http.Request, ag *ArchGu
 	}
 
 	log.Println("Dashboard WebSocket client disconnected")
+	// Remove the connection when client disconnects
+	if ag != nil {
+		ag.RemoveDashboardConnection(conn)
+	}
 }
 
 // collectRealSystemMetrics collects actual system metrics using gopsutil
