@@ -6,7 +6,9 @@ import { useEffect } from "react";
 
 declare global {
   interface Window {
-    paypal: unknown;
+    paypal?: {
+      Buttons: (opts: unknown) => { render: (selector: string) => void };
+    };
   }
 }
 
@@ -89,80 +91,90 @@ const pricingPlans = [
       { title: "Private Model Hosting (Optional)", description: "For organizations with strict data residency or privacy requirements, we offer the option to deploy and run the AI models within your own cloud environment." }
     ],
     button: {
-      type: "paypal",
-      id: "paypal-button-container-P-2X468481V7159314XNDQBCDQ",
-      script: `<script src="https://www.paypal.com/sdk/js?client-id=AdPGnU51COkasse7mk00arRysO8TpSeEDdeP48XAfvLvtFfkVb9Ehf2v2VpElGJBV6GvXMHneTxNO6nA&vault=true&intent=subscription" data-sdk-integration-source="button-factory"></script>
-<script>
-  paypal.Buttons({
-      style: {
-          shape: 'rect',
-          color: 'blue',
-          layout: 'vertical',
-          label: 'subscribe'
-      },
-      createSubscription: function(data, actions) {
-        return actions.subscription.create({
-          plan_id: 'P-2X468481V7159314XNDQBCDQ'
-        });
-      },
-      onApprove: function(data, actions) {
-        alert(data.subscriptionID);
-      }
-  }).render('#paypal-button-container-P-2X468481V7159314XNDQBCDQ');
-</script>`
+      type: "calendly-inline",
+      url: "https://calendly.com/gizmorattler/30min",
+      style: { minWidth: 320, height: 630 }
     }
   }
 ];
 
 const Pricing = () => {
   useEffect(() => {
-    // Load PayPal scripts for cloud and enterprise
+    // Load PayPal script for Cloud hosting (Enterprise PayPal intentionally not used here)
     const cloudScript = document.createElement('script');
     cloudScript.src = "https://www.paypal.com/sdk/js?client-id=AdPGnU51COkasse7mk00arRysO8TpSeEDdeP48XAfvLvtFfkVb9Ehf2v2VpElGJBV6GvXMHneTxNO6nA&vault=true&intent=subscription";
     cloudScript.setAttribute('data-sdk-integration-source', 'button-factory');
     document.head.appendChild(cloudScript);
 
-    cloudScript.onload = () => {
-      if (window.paypal) {
-        (window.paypal as any).Buttons({
-          style: {
-            shape: 'rect',
-            color: 'blue',
-            layout: 'vertical',
-            label: 'subscribe'
-          },
-          createSubscription: function(data, actions) {
-            return actions.subscription.create({
-              plan_id: 'P-9L031542LG006033FNDQA36Q',
-              quantity: 1
-            });
-          },
-          onApprove: function(data, actions) {
-            alert(data.subscriptionID);
-          }
-        }).render('#paypal-button-container-P-9L031542LG006033FNDQA36Q');
+    // Conditionally load Calendly widget script and stylesheet if any plan uses calendly-inline
+    const hasCalendly = pricingPlans.some(p => {
+      const b = (p as Record<string, unknown>).button as Record<string, unknown> | undefined;
+      return b && b.type === 'calendly-inline';
+    });
+    let calendlyScript: HTMLScriptElement | null = null;
+    let calendlyCss: HTMLLinkElement | null = null;
+    if (hasCalendly) {
+      calendlyCss = document.createElement('link');
+      calendlyCss.rel = 'stylesheet';
+      calendlyCss.href = 'https://assets.calendly.com/assets/external/widget.css';
+      document.head.appendChild(calendlyCss);
 
-        (window.paypal as any).Buttons({
-          style: {
-            shape: 'rect',
-            color: 'blue',
-            layout: 'vertical',
-            label: 'subscribe'
-          },
-          createSubscription: function(data, actions) {
-            return actions.subscription.create({
-              plan_id: 'P-2X468481V7159314XNDQBCDQ'
-            });
-          },
-          onApprove: function(data, actions) {
-            alert(data.subscriptionID);
-          }
-        }).render('#paypal-button-container-P-2X468481V7159314XNDQBCDQ');
+      calendlyScript = document.createElement('script');
+      calendlyScript.src = 'https://assets.calendly.com/assets/external/widget.js';
+      calendlyScript.async = true;
+      document.head.appendChild(calendlyScript);
+    }
+
+    cloudScript.onload = () => {
+  if (window.paypal) {
+        // Only render into containers that actually exist in the DOM.
+        const cloudContainer = document.getElementById('paypal-button-container-P-9L031542LG006033FNDQA36Q');
+        if (cloudContainer) {
+          window.paypal.Buttons({
+            style: {
+              shape: 'rect',
+              color: 'blue',
+              layout: 'vertical',
+              label: 'subscribe'
+            },
+            createSubscription: function(data, actions) {
+              return actions.subscription.create({
+                plan_id: 'P-9L031542LG006033FNDQA36Q',
+                quantity: 1
+              });
+            },
+            onApprove: function(data, actions) {
+              alert(data.subscriptionID);
+            }
+          }).render('#paypal-button-container-P-9L031542LG006033FNDQA36Q');
+        }
+
+        const enterpriseContainer = document.getElementById('paypal-button-container-P-2X468481V7159314XNDQBCDQ');
+        if (enterpriseContainer) {
+          window.paypal.Buttons({
+            style: {
+              shape: 'rect',
+              color: 'blue',
+              layout: 'vertical',
+              label: 'subscribe'
+            },
+            createSubscription: function(data, actions) {
+              return actions.subscription.create({
+                plan_id: 'P-2X468481V7159314XNDQBCDQ'
+              });
+            },
+            onApprove: function(data, actions) {
+              alert(data.subscriptionID);
+            }
+          }).render('#paypal-button-container-P-2X468481V7159314XNDQBCDQ');
+        }
       }
     };
 
     return () => {
-      document.head.removeChild(cloudScript);
+      if (cloudScript && document.head.contains(cloudScript)) document.head.removeChild(cloudScript);
+      if (calendlyScript && document.head.contains(calendlyScript)) document.head.removeChild(calendlyScript);
+      if (calendlyCss && document.head.contains(calendlyCss)) document.head.removeChild(calendlyCss);
     };
   }, []);
 
@@ -225,6 +237,14 @@ const Pricing = () => {
                       {plan.button.text}
                     </a>
                   </Button>
+                ) : plan.button.type === 'calendly-inline' ? (
+                  <div className="w-full">
+                    <div
+                      className="calendly-inline-widget"
+                      data-url={plan.button.url}
+                      style={plan.button.style as React.CSSProperties}
+                    />
+                  </div>
                 ) : (
                   <div id={plan.button.id} className="w-full"></div>
                 )}

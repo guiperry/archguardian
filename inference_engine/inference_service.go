@@ -35,15 +35,15 @@ type LLMAttempt struct {
 // InferenceService manages the interaction with the gollm library and its providers.
 type InferenceService struct {
 	// Store lists of attempts instead of single instances
-	primaryAttempts  []LLMAttempt
-	fallbackAttempts []LLMAttempt
-	delegator        *DelegatorService
-	orchestrator     *TaskOrchestrator // ADDED: Orchestrator for complex, multi-step tasks
-	db               DatabaseAccessor  // ADDED: Use the DatabaseAccessor interface
-	contextManager   *ContextManager   // ADDED: Context Manager instance
-	isRunning        bool
-	mutex            sync.Mutex
-	moa              *gollm.MOA
+	primaryAttempts   []LLMAttempt
+	fallbackAttempts  []LLMAttempt
+	delegator         *DelegatorService
+	orchestrator      TaskOrchestratorInterface // ADDED: Orchestrator for complex, multi-step tasks
+	db                DatabaseAccessor          // ADDED: Use the DatabaseAccessor interface
+	contextStrategist *ContextStrategist        // ADDED: Context Manager instance
+	isRunning         bool
+	mutex             sync.Mutex
+	moa               *gollm.MOA
 	// Store names/config options for MOA defaults, separate from execution attempts
 	moaPrimaryModelName  string
 	moaFallbackModelName string
@@ -57,8 +57,9 @@ func NewInferenceService(db DatabaseAccessor) (*InferenceService, error) {
 		// Initialize slices
 		primaryAttempts:  make([]LLMAttempt, 0),
 		fallbackAttempts: make([]LLMAttempt, 0),
-		// Initialize ContextManager with default strategy
-		contextManager: NewContextManager(
+		// Initialize ContextStrategist with default strategy
+		contextStrategist: NewContextStrategist(
+			nil,                                      // Orchestrator is not yet created, will be set later.
 			ChunkByTokenCount,                        // Use token count for better splitting
 			WithProcessingMode(SequentialProcessing), // Default to sequential
 		),
@@ -137,10 +138,20 @@ func (s *InferenceService) StartWithConfig(attemptConfigs []LLMAttemptConfig, pl
 		log.Printf("[WARN] InferenceService: Initial MOA configuration failed: %v. MOA features disabled.", err)
 	}
 
+	// --- Create the Task Orchestrator ---
+	s.orchestrator = NewTaskOrchestrator(s.delegator, plannerModel, executorModels, finalizerModel, verifierModel)
+	if s.orchestrator == nil {
+		return fmt.Errorf("failed to create task orchestrator")
+	}
+	log.Println("InferenceService: TaskOrchestrator created.")
+
+	// Now that the orchestrator exists, link it to the strategist.
+	s.contextStrategist.orchestrator = s.orchestrator
+
 	// Create the Delegator Service
 	delegatorTokenLimit := s.primaryAttempts[0].Config.MaxTokens
 	delegatorTokenModel := s.primaryAttempts[0].Config.ModelName
-	s.delegator = NewDelegatorService(s.primaryAttempts, s.fallbackAttempts, delegatorTokenLimit, delegatorTokenModel, s.moa, s.contextManager)
+	s.delegator = NewDelegatorService(s.primaryAttempts, s.fallbackAttempts, delegatorTokenLimit, delegatorTokenModel, s.moa, s.contextStrategist)
 	if s.delegator == nil {
 		log.Println("[ERROR] InferenceService: Failed to create DelegatorService.")
 		s.isRunning = false
@@ -148,13 +159,6 @@ func (s *InferenceService) StartWithConfig(attemptConfigs []LLMAttemptConfig, pl
 		return fmt.Errorf("failed to create delegator service")
 	}
 	log.Println("InferenceService: DelegatorService created.")
-
-	// --- Create the Task Orchestrator ---
-	s.orchestrator = NewTaskOrchestrator(s.delegator, plannerModel, executorModels, finalizerModel, verifierModel)
-	if s.orchestrator == nil {
-		return fmt.Errorf("failed to create task orchestrator")
-	}
-	log.Println("InferenceService: TaskOrchestrator created.")
 
 	s.isRunning = true
 	log.Println("InferenceService: Started successfully with dynamic configuration.")
@@ -250,9 +254,8 @@ func (s *InferenceService) Start() error {
 	// Pass the lists of attempts and the MOA instance
 	// The first primary attempt's config determines the initial token limit check
 	delegatorTokenLimit := s.primaryAttempts[0].Config.MaxTokens
-	delegatorTokenModel := s.primaryAttempts[0].Config.ModelName // Model used for token estimation
-	// Pass contextManager to DelegatorService
-	s.delegator = NewDelegatorService(s.primaryAttempts, s.fallbackAttempts, delegatorTokenLimit, delegatorTokenModel, s.moa, s.contextManager)
+	delegatorTokenModel := s.primaryAttempts[0].Config.ModelName // Model used for token estimation // Pass contextStrategist to DelegatorService
+	s.delegator = NewDelegatorService(s.primaryAttempts, s.fallbackAttempts, delegatorTokenLimit, delegatorTokenModel, s.moa, s.contextStrategist)
 	if s.delegator == nil {
 		log.Println("[ERROR] InferenceService: Failed to create DelegatorService.") // Corrected log message
 		s.isRunning = false
@@ -281,7 +284,7 @@ func (s *InferenceService) Stop() error {
 	s.moaPrimaryOpts = nil
 	s.moaFallbackOpts = nil
 	s.delegator = nil    // Clear delegator
-	s.orchestrator = nil // Clear orchestrator
+	s.orchestrator = nil // Clear orchestrator // s.contextStrategist = nil // Keep context manager? Or re-init on Start? Let's keep it.
 	// s.contextManager = nil // Keep context manager? Or re-init on Start? Let's keep it.
 	log.Println("InferenceService stopped.")
 	return nil
@@ -298,7 +301,7 @@ func (s *InferenceService) GenerateText(ctx context.Context, modelName string, p
 	s.mutex.Unlock()
 
 	log.Printf("InferenceService: Delegating generation request to DelegatorService. Model: '%s', Instruction: '%s'", modelName, instructionText)
-	// --- Adapt GenerateText to potentially use ContextManager ---
+	// --- Adapt GenerateText to potentially use ContextStrategist ---
 	// The delegator will now handle the potential call to ContextManager internally
 	// Pass modelName and instructionText to the delegator
 	response, err := delegatorInstance.GenerateSimple(ctx, modelName, promptText, instructionText)
@@ -368,11 +371,11 @@ func (s *InferenceService) GenerateTextWithMOA(promptText string, instructionTex
 	return response, nil
 }
 
-// --- ADDED: GenerateTextWithContextManager ---
+// --- ADDED: GenerateTextWithContextStrategist ---
 // Explicitly trigger context manager processing (useful for testing or specific UI actions)
-func (s *InferenceService) GenerateTextWithContextManager(promptText, instruction string, llmProviderName string) (string, error) {
+func (s *InferenceService) GenerateTextWithContextStrategist(promptText, instruction string, llmProviderName string) (string, error) {
 	s.mutex.Lock()
-	if !s.isRunning || s.contextManager == nil {
+	if !s.isRunning || s.contextStrategist == nil {
 		s.mutex.Unlock()
 		return "", errors.New("service not running or context manager not configured")
 	}
@@ -382,15 +385,15 @@ func (s *InferenceService) GenerateTextWithContextManager(promptText, instructio
 		s.mutex.Unlock()
 		return "", fmt.Errorf("LLM provider '%s' not found or configured", llmProviderName)
 	}
-	ctxMgr := s.contextManager
+	ctxMgr := s.contextStrategist
 	s.mutex.Unlock()
 
 	ctx := context.Background()
-	log.Printf("InferenceService: Explicitly calling ContextManager with provider %s", llmProviderName)
+	log.Printf("InferenceService: Explicitly calling ContextStrategist with provider %s", llmProviderName)
 	// Adapt llmInstance to TextGenerator interface if needed
 	// Wrap the LLM in our adapter to implement TextGenerator
 	wrappedLLM := &LLMAdapter{LLM: llmInstance, ProviderName: llmProviderName} // Pass ProviderName
-	return ctxMgr.ProcessLargePrompt(ctx, wrappedLLM, promptText, instruction)
+	return ctxMgr.executeCompaction(ctx, wrappedLLM, promptText, instruction)
 }
 
 // ExecuteComplexTask delegates a complex task to the orchestrator.

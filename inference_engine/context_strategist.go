@@ -24,6 +24,14 @@ const (
 	ChunkByTokenCount
 )
 
+// ContextStrategy defines the high-level approach for handling large contexts.
+type ContextStrategy string
+
+const (
+	CompactionStrategy    ContextStrategy = "compaction"
+	OrchestrationStrategy ContextStrategy = "orchestration"
+)
+
 // ProcessingMode defines how chunks should be processed.
 type ProcessingMode int
 
@@ -34,8 +42,14 @@ const (
 	SequentialProcessing
 )
 
-// ContextManager handles chunking and processing of large text inputs.
-type ContextManager struct {
+// TaskOrchestratorInterface defines the interface for task orchestrators
+type TaskOrchestratorInterface interface {
+	ExecuteComplexTask(ctx context.Context, complexPrompt string) (string, error)
+}
+
+// ContextStrategist decides on and executes a strategy for handling large text inputs.
+type ContextStrategist struct {
+	orchestrator TaskOrchestratorInterface // ADDED: Reference to the orchestrator for the sub-agent strategy
 	// inferenceService TextGenerator // REMOVED: LLM will be passed to ProcessLargePrompt
 	strategy           ChunkingStrategy // How to split the text
 	processingMode     ProcessingMode   // How to process chunks
@@ -45,40 +59,40 @@ type ContextManager struct {
 	contextTokenBudget int              // Max tokens for summary context in sequential mode
 }
 
-// ContextManagerOption defines a functional option for configuring ContextManager.
-type ContextManagerOption func(*ContextManager)
+// ContextStrategistOption defines a functional option for configuring ContextStrategist.
+type ContextStrategistOption func(*ContextStrategist)
 
 // WithProcessingMode sets the processing mode.
-func WithProcessingMode(mode ProcessingMode) ContextManagerOption {
-	return func(cm *ContextManager) {
+func WithProcessingMode(mode ProcessingMode) ContextStrategistOption {
+	return func(cm *ContextStrategist) {
 		cm.processingMode = mode
 	}
 }
 
 // WithMaxChunkSize sets the maximum chunk size in tokens.
-func WithMaxChunkSize(size int) ContextManagerOption {
-	return func(cm *ContextManager) {
+func WithMaxChunkSize(size int) ContextStrategistOption {
+	return func(cm *ContextStrategist) {
 		cm.maxChunkSize = size
 	}
 }
 
 // WithChunkOverlap sets the overlap between chunks in tokens.
-func WithChunkOverlap(overlap int) ContextManagerOption {
-	return func(cm *ContextManager) {
+func WithChunkOverlap(overlap int) ContextStrategistOption {
+	return func(cm *ContextStrategist) {
 		cm.chunkOverlap = overlap
 	}
 }
 
 // WithModelName sets the model name for token estimation.
-func WithModelName(modelName string) ContextManagerOption {
-	return func(cm *ContextManager) {
+func WithModelName(modelName string) ContextStrategistOption {
+	return func(cm *ContextStrategist) {
 		cm.modelName = modelName
 	}
 }
 
 // WithContextTokenBudget sets the maximum tokens for the summary context in sequential mode.
-func WithContextTokenBudget(budget int) ContextManagerOption {
-	return func(cm *ContextManager) {
+func WithContextTokenBudget(budget int) ContextStrategistOption {
+	return func(cm *ContextStrategist) {
 		cm.contextTokenBudget = budget
 	}
 }
@@ -90,11 +104,12 @@ type TextGenerator interface {
 	// Add other methods if needed by the context manager, e.g., Generate(ctx, prompt)
 }
 
-// NewContextManager creates a new ContextManager with the given options.
+// NewContextStrategist creates a new ContextStrategist with the given options.
 // The TextGenerator (LLM) is now passed during processing, not creation.
-func NewContextManager(strategy ChunkingStrategy, opts ...ContextManagerOption) *ContextManager {
+func NewContextStrategist(orchestrator TaskOrchestratorInterface, strategy ChunkingStrategy, opts ...ContextStrategistOption) *ContextStrategist {
 	// Create with default values
-	cm := &ContextManager{
+	cm := &ContextStrategist{
+		orchestrator: orchestrator,
 		// inferenceService: service, // REMOVED
 		strategy:           strategy,
 		processingMode:     ParallelProcessing, // Default to parallel
@@ -112,8 +127,75 @@ func NewContextManager(strategy ChunkingStrategy, opts ...ContextManagerOption) 
 	return cm
 }
 
+// DecideStrategy analyzes the prompt and determines the best strategy to use.
+func (cm *ContextStrategist) DecideStrategy(ctx context.Context, llm TextGenerator, largePrompt string, instructionPerChunk string) (string, error) {
+	// For now, we will use a simplified logic. A more advanced implementation
+	// would use an LLM call to make this decision.
+	// Let's check for keywords that suggest a multi-step plan is needed.
+	keywords := []string{"plan", "step-by-step", "implement", "refactor", "fix the following issue", "generate a patch"}
+	for _, keyword := range keywords {
+		if strings.Contains(strings.ToLower(largePrompt), keyword) {
+			log.Println("ContextStrategist: Detected keywords for orchestration. Choosing OrchestrationStrategy.")
+			return cm.executeOrchestration(ctx, largePrompt)
+		}
+	}
+
+	// Default to Compaction
+	log.Println("ContextStrategist: Defaulting to CompactionStrategy.")
+	return cm.executeCompaction(ctx, llm, largePrompt, instructionPerChunk)
+}
+
+// executeOrchestration handles the sub-agent task strategy by delegating to the TaskOrchestrator.
+func (cm *ContextStrategist) executeOrchestration(ctx context.Context, complexPrompt string) (string, error) {
+	if cm.orchestrator == nil {
+		return "", errors.New("orchestrator is not available in ContextStrategist to execute complex task")
+	}
+	log.Println("ContextStrategist: Executing complex task via TaskOrchestrator.")
+	return cm.orchestrator.ExecuteComplexTask(ctx, complexPrompt)
+}
+
+// executeNoteTaking is a placeholder for the structured note-taking strategy.
+func (cm *ContextStrategist) executeNoteTaking(ctx context.Context, llm TextGenerator, largePrompt string) (string, error) {
+	// TODO: Implement structured note-taking.
+	// 1. Give the LLM tools to `save_note(key, content)` and `retrieve_note(key)`.
+	// 2. The LLM would first analyze the prompt and decide if it needs to retrieve notes.
+	// 3. It would then process the prompt, potentially saving new notes.
+	// 4. This requires a persistent key-value store accessible by the inference service.
+	log.Println("ContextStrategist: Structured Note-Taking strategy is not yet implemented.")
+	// Fallback to compaction for now.
+	return cm.executeCompaction(ctx, llm, largePrompt, "Process the following text:")
+}
+
+// executeCompaction chunks the input, processes each chunk, and reassembles the results.
+// This is the refactored version of the original ProcessLargePrompt.
+func (cm *ContextStrategist) executeCompaction(ctx context.Context, llm TextGenerator, largePrompt string, instructionPerChunk string) (string, error) {
+	if llm == nil {
+		return "", fmt.Errorf("context strategist cannot process: TextGenerator (LLM) is nil")
+	}
+
+	chunks := cm.splitIntoChunks(largePrompt)
+	if len(chunks) == 0 {
+		return "", fmt.Errorf("prompt resulted in zero chunks")
+	}
+
+	log.Printf("ContextStrategist: Executing Compaction strategy with %d chunks using %s mode...", len(chunks), func() string {
+		if cm.processingMode == ParallelProcessing {
+			return "parallel"
+		}
+		return "sequential"
+	}())
+
+	// Choose processing method based on mode
+	if cm.processingMode == SequentialProcessing {
+		return cm.processSequentially(ctx, llm, chunks, instructionPerChunk, largePrompt)
+	}
+
+	// Default to parallel processing
+	return cm.processInParallel(ctx, llm, chunks, instructionPerChunk)
+}
+
 // splitIntoChunks splits text based on the configured strategy.
-func (cm *ContextManager) splitIntoChunks(text string) []string {
+func (cm *ContextStrategist) splitIntoChunks(text string) []string {
 	switch cm.strategy {
 	case ChunkByParagraph:
 		// Simple split by double newline
@@ -167,7 +249,7 @@ func (cm *ContextManager) splitIntoChunks(text string) []string {
 }
 
 // groupSentencesIntoChunks groups sentences into larger chunks to avoid too many small chunks.
-func (cm *ContextManager) groupSentencesIntoChunks(sentences []string) []string {
+func (cm *ContextStrategist) groupSentencesIntoChunks(sentences []string) []string {
 	if len(sentences) == 0 {
 		return []string{}
 	}
@@ -203,7 +285,7 @@ func (cm *ContextManager) groupSentencesIntoChunks(sentences []string) []string 
 }
 
 // splitByTokenCount splits text into chunks based on token count.
-func (cm *ContextManager) splitByTokenCount(text string) []string {
+func (cm *ContextStrategist) splitByTokenCount(text string) []string {
 	// First split by paragraphs to preserve natural boundaries
 	paragraphs := strings.Split(text, "\n\n")
 
@@ -298,40 +380,9 @@ func (cm *ContextManager) splitByTokenCount(text string) []string {
 	return chunks
 }
 
-// ProcessLargePrompt chunks the input, processes each chunk via the provided LLM,
-// and reassembles the results.
-// Accepts the TextGenerator (LLM instance) to use for processing.
-func (cm *ContextManager) ProcessLargePrompt(ctx context.Context, llm TextGenerator, largePrompt string, instructionPerChunk string) (string, error) {
-	if llm == nil {
-		return "", fmt.Errorf("context manager cannot process: TextGenerator (LLM) is nil")
-	}
-
-	chunks := cm.splitIntoChunks(largePrompt)
-	if len(chunks) == 0 {
-		return "", fmt.Errorf("prompt resulted in zero chunks")
-	}
-
-	log.Printf("ContextManager: Processing %d chunks using %s mode...",
-		len(chunks),
-		func() string {
-			if cm.processingMode == ParallelProcessing {
-				return "parallel"
-			}
-			return "sequential"
-		}())
-
-	// Choose processing method based on mode
-	if cm.processingMode == SequentialProcessing {
-		return cm.processSequentially(ctx, llm, chunks, instructionPerChunk)
-	}
-
-	// Default to parallel processing
-	return cm.processInParallel(ctx, llm, chunks, instructionPerChunk)
-}
-
 // processInParallel processes chunks in parallel for speed.
 // Accepts the TextGenerator (LLM instance).
-func (cm *ContextManager) processInParallel(_ context.Context, llm TextGenerator, chunks []string, instructionPerChunk string) (string, error) {
+func (cm *ContextStrategist) processInParallel(_ context.Context, llm TextGenerator, chunks []string, instructionPerChunk string) (string, error) {
 	var wg sync.WaitGroup
 	var lastError error
 	var errMutex sync.Mutex                     // To safely write to lastError from goroutines
@@ -340,8 +391,8 @@ func (cm *ContextManager) processInParallel(_ context.Context, llm TextGenerator
 	for i, chunk := range chunks {
 		wg.Add(1)
 		go func(index int, chunkText string) {
-			defer wg.Done()
-			log.Printf("ContextManager: Processing chunk %d/%d in parallel...", index+1, len(chunks))
+			defer wg.Done() // Corrected from cm.wg.Done()
+			log.Printf("ContextStrategist: Processing chunk %d/%d in parallel...", index+1, len(chunks))
 
 			// Construct prompt for this chunk
 			chunkPrompt := fmt.Sprintf("%s\n\n---\n%s\n---", instructionPerChunk, chunkText)
@@ -351,12 +402,12 @@ func (cm *ContextManager) processInParallel(_ context.Context, llm TextGenerator
 				errMutex.Lock()
 				lastError = fmt.Errorf("error processing chunk %d: %w", index+1, err)
 				errMutex.Unlock()
-				log.Printf("ContextManager: Error on chunk %d: %v", index+1, err)
+				log.Printf("ContextStrategist: Error on chunk %d: %v", index+1, err)
 				resultsArray[index] = fmt.Sprintf("[ERROR PROCESSING CHUNK %d]", index+1) // Placeholder
 				return
 			}
 			resultsArray[index] = result
-			log.Printf("ContextManager: Chunk %d processed.", index+1)
+			log.Printf("ContextStrategist: Chunk %d processed.", index+1)
 		}(i, chunk)
 	}
 
@@ -365,21 +416,14 @@ func (cm *ContextManager) processInParallel(_ context.Context, llm TextGenerator
 	// Reassemble results in order
 	finalResult := strings.Join(resultsArray, "\n\n---\n\n") // Join with a separator
 
-	log.Println("ContextManager: Finished processing all chunks in parallel.")
+	log.Println("ContextStrategist: Finished processing all chunks in parallel.")
 	return finalResult, lastError
 }
 
 // processSequentially processes chunks in sequence, passing context between them.
 // Accepts the TextGenerator (LLM instance).
-
-// processSequentially processes chunks in sequence, passing context between them.
-// Accepts the TextGenerator (LLM instance).
-func (cm *ContextManager) processSequentially(ctx context.Context, llm TextGenerator, chunks []string, instructionPerChunk string) (string, error) {
-	// Instead of using pre-split chunks, we'll manage the text dynamically.
-	// Join the pre-split chunks back together for this approach.
-	// A better long-term solution might be to pass the raw text here.
-	originalPrompt := strings.Join(chunks, "\n\n") // Keep original prompt for final reassembly
-	remainingText := strings.Join(chunks, "\n\n")  // Reconstruct (or pass original text)
+func (cm *ContextStrategist) processSequentially(ctx context.Context, llm TextGenerator, chunks []string, instructionPerChunk, originalPrompt string) (string, error) {
+	remainingText := strings.Join(chunks, "\n\n") // Reconstruct (or pass original text)
 
 	var results []string
 	var previousOutputSummary string // Store summary of previous output
@@ -398,19 +442,19 @@ func (cm *ContextManager) processSequentially(ctx context.Context, llm TextGener
 		)
 
 		// Calculate tokens used by instruction and summary
-		contextTokens = instructionTokens + summaryTokens
+		contextTokens = instructionTokens + summaryTokens + estimateTokens(instructionPerChunk, cm.modelName)
 
 		// Log token distribution for debugging
-		log.Printf("ContextManager: Chunk %d token budget - Instruction: %d, Summary: %d, Context: %d, Content budget: %d",
+		log.Printf("ContextStrategist: Chunk %d token budget - Instruction: %d, Summary: %d, Context: %d, Content budget: %d",
 			chunkIndex,
 			instructionTokens,
 			summaryTokens,
 			contextTokens,
 			cm.maxChunkSize-contextTokens-50)
 
-		contentBudget := cm.maxChunkSize - contextTokens - 50
+		contentBudget := cm.maxChunkSize - contextTokens - 50 // Add buffer
 		if contentBudget <= 0 {
-			log.Printf("ContextManager: Warning - No token budget left for chunk %d content after context/instruction. Context Tokens: %d", chunkIndex, contextTokens)
+			log.Printf("ContextStrategist: Warning - No token budget left for chunk %d content after context/instruction. Context Tokens: %d", chunkIndex, contextTokens)
 			// Handle this case - maybe skip chunk, return error, or try with minimal content?
 			// For now, let's try to take a very small chunk.
 			contentBudget = 50 // Arbitrary small budget
@@ -426,19 +470,19 @@ func (cm *ContextManager) processSequentially(ctx context.Context, llm TextGener
 				// Force taking at least some characters if budget was effectively zero
 				chunkEndIndex = min(len(remainingText), 100)
 			}
-			log.Printf("ContextManager: Using fallback split index %d for chunk %d", chunkEndIndex, chunkIndex)
+			log.Printf("ContextStrategist: Using fallback split index %d for chunk %d", chunkEndIndex, chunkIndex)
 		}
 
 		currentChunk = strings.TrimSpace(remainingText[:chunkEndIndex])
 		remainingText = strings.TrimSpace(remainingText[chunkEndIndex:])
 
 		if currentChunk == "" && remainingText != "" {
-			log.Printf("ContextManager: Warning - Could not extract next chunk within budget for chunk %d.", chunkIndex)
+			log.Printf("ContextStrategist: Warning - Could not extract next chunk within budget for chunk %d.", chunkIndex)
 			results = append(results, fmt.Sprintf("[ERROR SKIPPING REST OF TEXT - CHUNK %d TOO SMALL FOR BUDGET]", chunkIndex))
 			break
 		}
 
-		log.Printf("ContextManager: Processing chunk %d sequentially (Content Budget: %d tokens)...", chunkIndex, contentBudget)
+		log.Printf("ContextStrategist: Processing chunk %d sequentially (Content Budget: %d tokens)...", chunkIndex, contentBudget)
 
 		// Construct the prompt for the current chunk
 		promptBuilder := strings.Builder{}
@@ -453,14 +497,14 @@ func (cm *ContextManager) processSequentially(ctx context.Context, llm TextGener
 		chunkPrompt = promptBuilder.String()
 		// --- Add logging for the prompt being sent ---
 
-		log.Printf("ContextManager: Sequential Prompt for Chunk %d:\n%s\n", chunkIndex, chunkPrompt)
+		log.Printf("ContextStrategist: Sequential Prompt for Chunk %d:\n%s\n", chunkIndex, chunkPrompt)
 		// --- End logging ---
 
 		result, err := llm.GenerateText(chunkPrompt) // Use the passed LLM
 		if err != nil {
 			// If an error occurs, return the results obtained so far and the error
 
-			log.Printf("ContextManager: Error on chunk %d: %v", chunkIndex, err)
+			log.Printf("ContextStrategist: Error on chunk %d: %v", chunkIndex, err)
 			results = append(results, fmt.Sprintf("[ERROR PROCESSING CHUNK %d]", chunkIndex))
 			return strings.Join(results, "\n\n---\n\n"),
 
@@ -468,23 +512,23 @@ func (cm *ContextManager) processSequentially(ctx context.Context, llm TextGener
 		}
 
 		results = append(results, result)
-		log.Printf("ContextManager: Chunk %d processed.", chunkIndex)
+		log.Printf("ContextStrategist: Chunk %d processed.", chunkIndex)
 
 		// Generate a high-quality summary using an AI call
 		summary, err := cm.aiSummarizeForContext(ctx, llm, currentChunk, result)
 		if err != nil {
-			log.Printf("ContextManager: Warning - failed to generate AI summary for chunk %d: %v. Proceeding without summary.", chunkIndex, err)
+			log.Printf("ContextStrategist: Warning - failed to generate AI summary for chunk %d: %v. Proceeding without summary.", chunkIndex, err)
 			previousOutputSummary = "" // Reset summary on failure
 		} else {
 			previousOutputSummary = summary
-			log.Printf("ContextManager: Generated AI summary for next chunk context: %s", previousOutputSummary)
+			log.Printf("ContextStrategist: Generated AI summary for next chunk context: %s", previousOutputSummary)
 		}
 	} // End of loop through remainingText
 
 	// === FINAL STEP: Reassemble and clean the results ===
 	finalResult, err := cm.reassembleAndClean(ctx, llm, originalPrompt, results)
 	if err != nil {
-		log.Printf("ContextManager: Final reassembly failed: %v. Returning raw joined results.", err)
+		log.Printf("ContextStrategist: Final reassembly failed: %v. Returning raw joined results.", err)
 		return strings.Join(results, "\n\n---\n\n"), nil // Return raw results as a fallback
 	}
 
@@ -492,7 +536,7 @@ func (cm *ContextManager) processSequentially(ctx context.Context, llm TextGener
 }
 
 // aiSummarizeForContext uses an LLM to create a high-quality summary of the last processed chunk and its result.
-func (cm *ContextManager) aiSummarizeForContext(_ context.Context, llm TextGenerator, previousChunk, previousResult string) (string, error) {
+func (cm *ContextStrategist) aiSummarizeForContext(_ context.Context, llm TextGenerator, previousChunk, previousResult string) (string, error) {
 	if previousResult == "" {
 		return "", nil
 	}
@@ -518,8 +562,8 @@ CONCISE SUMMARY FOR NEXT CHUNK:
 }
 
 // reassembleAndClean takes the individual chunk results and uses an LLM to create a final, clean, coherent document.
-func (cm *ContextManager) reassembleAndClean(_ context.Context, llm TextGenerator, originalPrompt string, chunkResults []string) (string, error) {
-	log.Println("ContextManager: Starting final reassembly and cleanup step...")
+func (cm *ContextStrategist) reassembleAndClean(_ context.Context, llm TextGenerator, originalPrompt string, chunkResults []string) (string, error) {
+	log.Println("ContextStrategist: Starting final reassembly and cleanup step...")
 
 	if len(chunkResults) == 0 {
 		return "", errors.New("no chunk results to reassemble")
@@ -587,76 +631,36 @@ func findSplitIndex(text string, tokenBudget int, modelName string) int {
 	return len(text)
 }
 
-// ProcessLargePromptWithStrategy processes a large prompt with a specific chunking strategy,
-// overriding the default strategy for this call only.
-func (cm *ContextManager) ProcessLargePromptWithStrategy(
-	ctx context.Context,
-	largePrompt string,
-	instructionPerChunk string,
-	strategy ChunkingStrategy,
-	llm TextGenerator, // Pass the LLM instance
-) (string, error) {
-	// Save the original strategy
-	originalStrategy := cm.strategy
-	cm.strategy = strategy
-	defer func() { cm.strategy = originalStrategy }() // Restore strategy
-
-	// Process with the temporary strategy and passed LLM
-	result, err := cm.ProcessLargePrompt(ctx, llm, largePrompt, instructionPerChunk)
-
-	return result, err
-}
-
-// ProcessLargePromptWithMode processes a large prompt with a specific processing mode,
-// overriding the default mode for this call only.
-func (cm *ContextManager) ProcessLargePromptWithMode(
-	ctx context.Context,
-	largePrompt string,
-	instructionPerChunk string,
-	mode ProcessingMode,
-	llm TextGenerator, // Pass the LLM instance
-) (string, error) {
-	// Save the original mode
-	originalMode := cm.processingMode
-	cm.processingMode = mode
-	defer func() { cm.processingMode = originalMode }() // Restore mode
-
-	// Process with the temporary mode and passed LLM
-	result, err := cm.ProcessLargePrompt(ctx, llm, largePrompt, instructionPerChunk)
-
-	return result, err
-}
-
 // GetChunkingStrategy returns the current chunking strategy.
-func (cm *ContextManager) GetChunkingStrategy() ChunkingStrategy {
+func (cm *ContextStrategist) GetChunkingStrategy() ChunkingStrategy {
 	return cm.strategy
 }
 
 // SetChunkingStrategy sets a new chunking strategy.
-func (cm *ContextManager) SetChunkingStrategy(strategy ChunkingStrategy) {
+func (cm *ContextStrategist) SetChunkingStrategy(strategy ChunkingStrategy) {
 	cm.strategy = strategy
 	log.Printf("ContextManager: Chunking strategy set to %d", strategy)
 }
 
 // GetProcessingMode returns the current processing mode.
-func (cm *ContextManager) GetProcessingMode() ProcessingMode {
+func (cm *ContextStrategist) GetProcessingMode() ProcessingMode {
 	return cm.processingMode
 }
 
 // SetProcessingMode sets a new processing mode.
-func (cm *ContextManager) SetProcessingMode(mode ProcessingMode) {
+func (cm *ContextStrategist) SetProcessingMode(mode ProcessingMode) {
 	cm.processingMode = mode
 	log.Printf("ContextManager: Processing mode set to %d", mode)
 }
 
 // SetMaxChunkSize sets the maximum chunk size in tokens.
-func (cm *ContextManager) SetMaxChunkSize(size int) {
+func (cm *ContextStrategist) SetMaxChunkSize(size int) {
 	cm.maxChunkSize = size
 	log.Printf("ContextManager: Max chunk size set to %d tokens", size)
 }
 
 // SetChunkOverlap sets the overlap between chunks in tokens.
-func (cm *ContextManager) SetChunkOverlap(overlap int) {
+func (cm *ContextStrategist) SetChunkOverlap(overlap int) {
 	cm.chunkOverlap = overlap
 	log.Printf("ContextManager: Chunk overlap set to %d tokens", overlap)
 }

@@ -1,7 +1,6 @@
 // /home/gperry/Documents/GitHub/Inc-Line/Wordpress-Inference-Engine/inference/delegator_service.go
 package inference_engine
 
-
 import (
 	"context"
 	"errors" // Import the errors package
@@ -21,10 +20,10 @@ import (
 // DelegatorService handles request delegation between a primary (proxy)
 // and a secondary (base) LLM, including fallback logic and MOA orchestration.
 type DelegatorService struct {
-	primaryAttempts  []LLMAttempt       // Ordered list of primary LLMs to try
-	fallbackAttempts []LLMAttempt       // Ordered list of fallback LLMs to try
-	memory           ConversationMemory // Manages conversation history
-	contextManager   *ContextManager    // ADDED: Reference to context manager
+	primaryAttempts   []LLMAttempt       // Ordered list of primary LLMs to try
+	fallbackAttempts  []LLMAttempt       // Ordered list of fallback LLMs to try
+	memory            ConversationMemory // Manages conversation history
+	contextStrategist *ContextStrategist // ADDED: Reference to context manager
 
 	// Configuration for delegation logic
 	tokenLimitThreshold  int        // Token limit to decide initial routing
@@ -33,8 +32,8 @@ type DelegatorService struct {
 }
 
 // NewDelegatorService creates a new delegator instance.
-// It requires lists of initialized LLM attempts, an optional MOA instance, and a ContextManager.
-func NewDelegatorService(primaryAttempts []LLMAttempt, fallbackAttempts []LLMAttempt, tokenLimit int, tokenModel string, moaInstance *gollm.MOA, ctxManager *ContextManager) *DelegatorService {
+// It requires lists of initialized LLM attempts, an optional MOA instance, and a ContextStrategist.
+func NewDelegatorService(primaryAttempts []LLMAttempt, fallbackAttempts []LLMAttempt, tokenLimit int, tokenModel string, moaInstance *gollm.MOA, ctxStrategist *ContextStrategist) *DelegatorService {
 	if len(primaryAttempts) == 0 || len(fallbackAttempts) == 0 {
 		log.Println("CRITICAL: NewDelegatorService called with empty primary or fallback attempts")
 		return nil
@@ -42,14 +41,14 @@ func NewDelegatorService(primaryAttempts []LLMAttempt, fallbackAttempts []LLMAtt
 	if moaInstance == nil {
 		log.Println("[WARN] NewDelegatorService: MOA instance is nil. MOA features will be disabled.")
 	}
-	if ctxManager == nil {
-		log.Println("[WARN] NewDelegatorService: ContextManager instance is nil. Chunking fallback will be disabled.")
+	if ctxStrategist == nil {
+		log.Println("[WARN] NewDelegatorService: ContextStrategist instance is nil. Large context handling will be disabled.")
 	}
 	return &DelegatorService{
 		primaryAttempts:      primaryAttempts,
 		fallbackAttempts:     fallbackAttempts,
 		moa:                  moaInstance,
-		contextManager:       ctxManager,                        // Store context manager
+		contextStrategist:    ctxStrategist,                     // Store context manager
 		memory:               NewSimpleWindowMemory(tokenModel), // Use tokenModel here
 		tokenLimitThreshold:  tokenLimit,                        // Use correct field name and passed value
 		tokenLimitCheckModel: tokenModel,                        // ADDED: Store the model name for token checking
@@ -168,25 +167,25 @@ func (d *DelegatorService) executeGenerationWithRetry(ctx context.Context, model
 		operationName, estimatedTokens, d.tokenLimitThreshold, d.tokenLimitCheckModel) // Log estimation, but don't bypass primary based on it.
 
 	// --- ADDED: Proactive Chunking Check ---
-	if estimatedTokens > d.tokenLimitThreshold && d.contextManager != nil {
-		log.Printf("DelegatorService (%s): Estimated tokens exceed limit. Attempting PROACTIVE chunking with ContextManager...", operationName)
+	if estimatedTokens > d.tokenLimitThreshold && d.contextStrategist != nil {
+		log.Printf("DelegatorService (%s): Estimated tokens exceed limit. Delegating to ContextStrategist...", operationName)
 		// Find a suitable LLM for chunking (e.g., the first primary or a designated one)
 		// Using the first primary attempt for proactive chunking
 		chunkingLLM := d.primaryAttempts[0].Instance
 		chunkingModelName := d.primaryAttempts[0].Config.ModelName
-		log.Printf("DelegatorService (%s): Using LLM '%s' for proactive chunking.", operationName, chunkingModelName)
+		log.Printf("DelegatorService (%s): Using LLM '%s' for context strategy execution.", operationName, chunkingModelName)
 
 		fullPromptForChunking := formatMessagesToPrompt(messages)
-		chunkInstruction := "Process the following section of text:"                 // Adjust as needed
+		chunkInstruction := instructionText                                          // Pass along the original instruction
 		wrappedLLM := &LLMAdapter{LLM: chunkingLLM, ProviderName: chunkingModelName} // Pass ProviderName
 
-		chunkedResponse, chunkErr := d.contextManager.ProcessLargePrompt(ctx, wrappedLLM, fullPromptForChunking, chunkInstruction)
+		chunkedResponse, chunkErr := d.contextStrategist.DecideStrategy(ctx, wrappedLLM, fullPromptForChunking, chunkInstruction)
 		if chunkErr == nil {
-			log.Printf("DelegatorService (%s): PROACTIVE ContextManager chunking successful.", operationName)
+			log.Printf("DelegatorService (%s): ContextStrategist processing successful.", operationName)
 			d.memory.AddMessage(gollm_types.MemoryMessage{Role: "assistant", Content: chunkedResponse})
 			return chunkedResponse, nil // Return successful chunked response
 		}
-		log.Printf("DelegatorService (%s): PROACTIVE ContextManager chunking failed: %v. Proceeding to standard attempt logic (will likely fail again or trigger reactive chunking).", operationName, chunkErr)
+		log.Printf("DelegatorService (%s): ContextStrategist processing failed: %v. Proceeding to standard attempt logic.", operationName, chunkErr)
 		// If proactive chunking fails, let the standard loop proceed, it might hit the reactive chunking later.
 	}
 	// --- END Proactive Chunking Check ---
@@ -263,33 +262,11 @@ func (d *DelegatorService) executeGenerationWithRetry(ctx context.Context, model
 			lastError = err // Store the error
 
 			// Decide if we should continue to the next attempt in *this* list
-			// --- ADDED: Reactive Chunking on Context Error ---
-			errStr := err.Error()
-			isContextError := strings.Contains(errStr, "context_length_exceeded") || strings.Contains(errStr, "token limit")
-
-			if isContextError && d.contextManager != nil {
-				log.Printf("DelegatorService (%s): Attempt with %s failed with context limit. Attempting REACTIVE chunking with ContextManager using the same LLM...", operationName, targetName)
-
-				// Use the current LLM instance that just failed for chunking
-				chunkingLLM := attempt.Instance
-				if chunkingLLM != nil {
-					// Reconstruct the full prompt string from the original messages
-					fullPromptForChunking := formatMessagesToPrompt(messages)    // Use the original full messages
-					chunkInstruction := "Process the following section of text:" // Adjust as needed
-
-					// Call the context manager
-					wrappedLLM := &LLMAdapter{LLM: chunkingLLM, ProviderName: attempt.Config.ProviderName} // Pass ProviderName
-					chunkedResponse, chunkErr := d.contextManager.ProcessLargePrompt(ctx, wrappedLLM, fullPromptForChunking, chunkInstruction)
-					if chunkErr == nil {
-						log.Printf("DelegatorService (%s): REACTIVE ContextManager chunking successful with %s.", operationName, targetName)
-						d.memory.AddMessage(gollm_types.MemoryMessage{Role: "assistant", Content: chunkedResponse})
-						return chunkedResponse, nil // Return successful chunked response
-					}
-					log.Printf("DelegatorService (%s): REACTIVE ContextManager chunking with %s failed: %v. Proceeding to next attempt.", operationName, targetName, chunkErr)
-					// If chunking fails, store its error (or keep the original context error?) and let the loop proceed.
-					// lastError = chunkErr // Optionally update lastError to the chunking error
-				}
-			} // --- END REACTIVE Chunking Check ---
+			// --- REMOVED: Reactive Chunking on Context Error ---
+			// The proactive check at the beginning of the function should handle this.
+			// If a context length error still occurs, it's a sign that token estimation is off
+			// or the LLM has a stricter limit than advertised. We will let it fall through to the
+			// next attempt or fail, rather than re-running the strategist.
 
 			log.Printf("DelegatorService (%s): Error is retryable. Continuing to next attempt...", operationName)
 		}
@@ -309,68 +286,6 @@ func (d *DelegatorService) executeGenerationWithRetry(ctx context.Context, model
 	if lastError == nil { // Should not happen if we reach here, but defensive check
 		lastError = errors.New("all attempts failed for unknown reasons")
 	}
-
-	// --- FINAL FALLBACK: Context Manager Chunking ---
-	// Check if the last error suggests a context length issue and if context manager exists
-	// This block now acts as a fallback if the *immediate* chunking attempt (for Cerebras) failed,
-	// or if a fallback LLM (like Gemini) failed with a context error.
-	errStr := lastError.Error()
-	isContextError := strings.Contains(errStr, "context_length_exceeded") || strings.Contains(errStr, "token limit")
-
-	if isContextError && d.contextManager != nil {
-		log.Printf("DelegatorService (%s): All attempts failed, last error indicates context limit. Attempting FINAL chunking fallback with ContextManager...", operationName)
-
-		// Find the Deepseek instance (or another designated chunking LLM for the final fallback)
-		var chunkingLLM llm.LLM
-		for _, attempt := range d.fallbackAttempts { // Search fallbacks first
-			// Use the first fallback LLM found for the final attempt
-			if attempt.Instance != nil {
-				chunkingLLM = attempt.Instance
-				log.Printf("DelegatorService (%s): Found LLM '%s' from provider '%s' for final chunking fallback.", operationName, attempt.Config.ModelName, attempt.Config.ProviderName)
-				break // Use the first one found
-			}
-		}
-		// Could add searching primaryAttempts if not found in fallback
-
-		if chunkingLLM != nil {
-			// Reconstruct the full prompt string from the original messages
-			fullPromptForChunking := formatMessagesToPrompt(messages)
-			// Define a generic instruction for the chunking process
-			chunkInstruction := "Process the following section of text:" // Adjust as needed
-
-			// Call the context manager with wrapped LLM
-			// Find the provider name for the selected chunkingLLM
-			providerName := "unknown"
-			for _, attempt := range d.fallbackAttempts { // Search again to get the name
-				if attempt.Instance == chunkingLLM {
-					providerName = attempt.Config.ProviderName
-					break
-				}
-			}
-			// If not found in fallback, check primary (though unlikely path)
-			if providerName == "unknown" {
-				for _, attempt := range d.primaryAttempts {
-					if attempt.Instance == chunkingLLM {
-						providerName = attempt.Config.ProviderName
-						break
-					}
-				}
-			}
-			wrappedLLM := &LLMAdapter{LLM: chunkingLLM, ProviderName: providerName} // Pass ProviderName
-			chunkedResponse, chunkErr := d.contextManager.ProcessLargePrompt(ctx, wrappedLLM, fullPromptForChunking, chunkInstruction)
-			if chunkErr == nil {
-				log.Printf("DelegatorService (%s): FINAL ContextManager chunking fallback successful.", operationName)
-				// Add the potentially long, combined response to memory
-				d.memory.AddMessage(gollm_types.MemoryMessage{Role: "assistant", Content: chunkedResponse})
-				return chunkedResponse, nil // Return successful chunked response
-			}
-			log.Printf("DelegatorService (%s): FINAL ContextManager chunking fallback failed: %v", operationName, chunkErr)
-			// If chunking also fails, return its error wrapped with the original context
-			return "", fmt.Errorf("%s failed after all attempts including final chunking, chunking error: %w (original error: %v)", operationName, chunkErr, lastError)
-		}
-		log.Printf("DelegatorService (%s): Context error detected, but no suitable LLM found/configured for final chunking fallback.", operationName)
-	}
-	// --- End FINAL FALLBACK ---
 
 	// If not a context error, or no context manager, or chunking LLM not found, return the last error from regular attempts
 	return "", fmt.Errorf("%s failed after all attempts, last error: %w", operationName, lastError)
