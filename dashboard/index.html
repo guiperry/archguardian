@@ -32,6 +32,7 @@
                 <button class="nav-btn" data-view="graph">Knowledge Graph</button>
                 <button class="nav-btn" data-view="issues">Issues</button>
                 <button class="nav-btn" data-view="coverage">Coverage</button>
+                <button class="nav-btn" data-view="alerts">Alerts</button>
             </div>
             <div class="project-active-label">
                 <span id="active-project-label">No project selected</span>
@@ -193,6 +194,26 @@
                 </div>
                 <div class="coverage-chart-container">
                     <canvas id="coverage-details-chart"></canvas>
+                </div>
+            </div>
+
+            <!-- Alerts View -->
+            <div id="alerts-view" class="view">
+                <div class="alerts-header">
+                    <h2>System Alerts</h2>
+                    <div class="alerts-controls">
+                        <button class="refresh-btn" onclick="window.dashboard.loadAlerts()">Refresh</button>
+                        <button class="clear-btn" onclick="window.dashboard.clearResolvedAlerts()">Clear Resolved</button>
+                    </div>
+                </div>
+                <div class="alerts-content">
+                    <div class="alerts-tabs">
+                        <button class="tab-btn active" data-tab="active">Active Alerts</button>
+                        <button class="tab-btn" data-tab="all">All Alerts</button>
+                    </div>
+                    <div id="alerts-container" class="alerts-container">
+                        <div class="loading">Loading alerts...</div>
+                    </div>
                 </div>
             </div>
 

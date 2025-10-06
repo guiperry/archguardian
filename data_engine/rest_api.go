@@ -11,6 +11,11 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/disk"
+	"github.com/shirou/gopsutil/v4/mem"
+	"github.com/shirou/gopsutil/v4/net"
+	"github.com/shirou/gopsutil/v4/process"
 )
 
 // RESTAPIServer handles REST API requests for data access
@@ -241,24 +246,38 @@ func (s *RESTAPIServer) handleGetMetrics(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Get metrics
-	metrics := s.dataEngine.GetMetrics()
-	if metrics == nil {
-		http.Error(w, "No metrics available", http.StatusServiceUnavailable)
-		return
+	// Get stream processor metrics
+	streamMetrics := s.dataEngine.GetMetrics()
+
+	// Collect system metrics
+	systemMetrics, err := s.collectSystemMetrics(r.Context())
+	if err != nil {
+		log.Printf("⚠️  Failed to collect system metrics: %v", err)
+		systemMetrics = map[string]interface{}{
+			"error": err.Error(),
+		}
+	}
+
+	// Combine metrics
+	combinedMetrics := map[string]interface{}{
+		"stream_processor": streamMetrics,
+		"system":           systemMetrics,
+		"timestamp":        time.Now(),
 	}
 
 	// Set content type
 	w.Header().Set("Content-Type", "application/json")
 
 	// Write response
-	json.NewEncoder(w).Encode(metrics)
+	json.NewEncoder(w).Encode(combinedMetrics)
 }
 
 // handleGetAlerts handles requests for alerts
 func (s *RESTAPIServer) handleGetAlerts(w http.ResponseWriter, r *http.Request) {
+	// If alerting subsystem is not available, return empty list (200) to keep API consumer-friendly
 	if s.dataEngine == nil || s.dataEngine.alerting == nil {
-		http.Error(w, "Alerting system not available", http.StatusServiceUnavailable)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]Alert{})
 		return
 	}
 
@@ -566,4 +585,62 @@ func (s *RESTAPIServer) IsRunning() bool {
 	defer s.mutex.RUnlock()
 
 	return s.isRunning
+}
+
+// collectSystemMetrics collects system metrics using gopsutil
+func (s *RESTAPIServer) collectSystemMetrics(ctx context.Context) (map[string]interface{}, error) {
+	metrics := make(map[string]interface{})
+
+	// CPU usage
+	cpuPercent, err := cpu.PercentWithContext(ctx, 0, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get CPU metrics: %w", err)
+	}
+	if len(cpuPercent) > 0 {
+		metrics["cpu"] = cpuPercent[0]
+	} else {
+		metrics["cpu"] = 0.0
+	}
+
+	// Memory usage
+	memInfo, err := mem.VirtualMemoryWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get memory metrics: %w", err)
+	}
+	metrics["memory"] = memInfo.UsedPercent
+
+	// Disk usage
+	diskInfo, err := disk.UsageWithContext(ctx, "/")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get disk metrics: %w", err)
+	}
+	metrics["disk"] = diskInfo.UsedPercent
+
+	// Network I/O
+	netInfo, err := net.IOCountersWithContext(ctx, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get network metrics: %w", err)
+	}
+	if len(netInfo) > 0 {
+		metrics["network"] = map[string]interface{}{
+			"in":  netInfo[0].BytesRecv,
+			"out": netInfo[0].BytesSent,
+		}
+	} else {
+		metrics["network"] = map[string]interface{}{
+			"in":  0,
+			"out": 0,
+		}
+	}
+
+	// Process information
+	processes, err := process.ProcessesWithContext(ctx)
+	if err == nil {
+		metrics["processes"] = len(processes)
+	} else {
+		metrics["processes"] = 0
+	}
+
+	metrics["timestamp"] = time.Now()
+	return metrics, nil
 }

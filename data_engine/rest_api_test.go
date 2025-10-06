@@ -98,9 +98,9 @@ func TestRESTAPIServer(t *testing.T) {
 		handler := http.HandlerFunc(apiServer.handleGetMetrics)
 		handler.ServeHTTP(rr, req)
 
-		// Check status code
-		if status := rr.Code; status != http.StatusServiceUnavailable {
-			t.Errorf("Handler returned wrong status code: got %v want %v", status, http.StatusServiceUnavailable)
+		// Check status code (metrics endpoint should return 200 even if internals are mocked)
+		if status := rr.Code; status != http.StatusOK {
+			t.Errorf("Handler returned wrong status code: got %v want %v", status, http.StatusOK)
 		}
 	})
 
@@ -119,9 +119,9 @@ func TestRESTAPIServer(t *testing.T) {
 		handler := http.HandlerFunc(apiServer.handleGetAlerts)
 		handler.ServeHTTP(rr, req)
 
-		// Check status code
-		if status := rr.Code; status != http.StatusServiceUnavailable {
-			t.Errorf("Handler returned wrong status code: got %v want %v", status, http.StatusServiceUnavailable)
+		// Check status code (alerts endpoint returns 200 with empty alerts when alerting system is not available)
+		if status := rr.Code; status != http.StatusOK {
+			t.Errorf("Handler returned wrong status code: got %v want %v", status, http.StatusOK)
 		}
 	})
 

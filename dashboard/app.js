@@ -22,6 +22,7 @@ class ArchGuardianDashboard {
         this.loadInitialData();
         this.setupCharts();
         this.setupConnectionTabs();
+        this.setupAlertsTabs();
         this.setupThemeToggle();
         // Print an initialization message to the dashboard console
         try { this.appendConsoleLog('Dashboard initialized'); } catch (e) { /* silent */ }
@@ -283,11 +284,62 @@ class ArchGuardianDashboard {
             case 'remediation_completed':
                 this.showNotification('Remediation completed successfully!', 'success');
                 break;
+            case 'alert':
+                this.handleAlertMessage(data);
+                break;
             case 'log':
                 // Log message is nested in data.data.message
                 const logMessage = data.data?.message || data.message || '';
                 this.appendConsoleLog(logMessage);
                 break;
+        }
+    }
+
+    handleAlertMessage(data) {
+        const alertData = data.data || data;
+        const alertId = alertData.alert_id || alertData.id;
+        const alertName = alertData.alert_name || alertData.title;
+        const alertDescription = alertData.description || alertData.message;
+        const alertLevel = alertData.level || 'info';
+
+        // Show browser notification if supported
+        this.showBrowserNotification(alertName, alertDescription, alertLevel);
+
+        // Show in-app notification
+        this.showNotification(`${alertName}: ${alertDescription}`, alertLevel);
+
+        // Log to console
+        this.appendConsoleLog(`🚨 ALERT [${alertLevel.toUpperCase()}]: ${alertName} - ${alertDescription}`);
+
+        // Update alerts view if it's currently visible
+        if (this.currentView === 'alerts') {
+            this.loadAlerts();
+        }
+    }
+
+    showBrowserNotification(title, body, level = 'info') {
+        // Check if browser notifications are supported and permitted
+        if ('Notification' in window) {
+            if (Notification.permission === 'granted') {
+                const notification = new Notification(`ArchGuardian - ${title}`, {
+                    body: body,
+                    icon: '/favicon.ico',
+                    tag: 'archguardian-alert',
+                    requireInteraction: level === 'critical' || level === 'error'
+                });
+
+                // Auto-close after 5 seconds for non-critical alerts
+                if (level !== 'critical' && level !== 'error') {
+                    setTimeout(() => notification.close(), 5000);
+                }
+            } else if (Notification.permission !== 'denied') {
+                // Request permission if not already denied
+                Notification.requestPermission().then(permission => {
+                    if (permission === 'granted') {
+                        this.showBrowserNotification(title, body, level);
+                    }
+                });
+            }
         }
     }
 
@@ -1097,6 +1149,9 @@ class ArchGuardianDashboard {
             case 'graph':
                 this.loadKnowledgeGraph();
                 break;
+            case 'alerts':
+                this.loadAlerts();
+                break;
             case 'settings':
                 this.loadSettings();
                 break;
@@ -1111,6 +1166,113 @@ class ArchGuardianDashboard {
 
     refreshCoverage() {
         this.loadCoverageData();
+    }
+
+    async loadAlerts() {
+        try {
+            const response = await fetch('http://localhost:3000/api/v1/alerts');
+            const data = await response.json();
+
+            this.renderAlerts(data.alerts || []);
+        } catch (error) {
+            console.error('Failed to load alerts:', error);
+            document.getElementById('alerts-container').innerHTML =
+                '<div class="error">Failed to load alerts data</div>';
+        }
+    }
+
+    async clearResolvedAlerts() {
+        try {
+            const response = await fetch('http://localhost:3000/api/v1/alerts/clear-resolved', {
+                method: 'POST'
+            });
+
+            if (response.ok) {
+                this.showNotification('Resolved alerts cleared successfully!', 'success');
+                this.loadAlerts(); // Refresh the alerts list
+            } else {
+                throw new Error('Failed to clear resolved alerts');
+            }
+        } catch (error) {
+            console.error('Failed to clear resolved alerts:', error);
+            this.showNotification('Failed to clear resolved alerts', 'error');
+        }
+    }
+
+    renderAlerts(alerts) {
+        const container = document.getElementById('alerts-container');
+        const activeTab = document.querySelector('.alerts-tabs .tab-btn.active')?.dataset.tab || 'active';
+
+        // Filter alerts based on active tab
+        let filteredAlerts = alerts;
+        if (activeTab === 'active') {
+            filteredAlerts = alerts.filter(alert => alert.status !== 'resolved');
+        }
+
+        if (filteredAlerts.length === 0) {
+            const message = activeTab === 'active' ? 'No active alerts!' : 'No alerts found!';
+            container.innerHTML = `<div class="no-issues">${message}</div>`;
+            return;
+        }
+
+        container.innerHTML = filteredAlerts.map(alert => `
+            <div class="alert-item alert-${alert.level || 'info'} ${alert.status === 'resolved' ? 'alert-resolved' : ''}">
+                <div class="alert-header">
+                    <div class="alert-meta">
+                        <span class="alert-level alert-level-${alert.level || 'info'}">${(alert.level || 'info').toUpperCase()}</span>
+                        <span class="alert-timestamp">${this.formatTimestamp(alert.timestamp)}</span>
+                        ${alert.status === 'resolved' ? '<span class="alert-status-resolved">RESOLVED</span>' : ''}
+                    </div>
+                    <div class="alert-actions">
+                        ${alert.status !== 'resolved' ? `<button class="alert-resolve-btn" onclick="window.dashboard.resolveAlert('${alert.id}')">Resolve</button>` : ''}
+                    </div>
+                </div>
+                <div class="alert-title">${alert.title || alert.name || 'Alert'}</div>
+                <div class="alert-description">${alert.description || alert.message || ''}</div>
+                ${alert.details ? `<div class="alert-details">${alert.details}</div>` : ''}
+                ${alert.source ? `<div class="alert-source">Source: ${alert.source}</div>` : ''}
+            </div>
+        `).join('');
+    }
+
+    formatTimestamp(timestamp) {
+        if (!timestamp) return '';
+
+        try {
+            const date = new Date(timestamp);
+            const now = new Date();
+            const diffMs = now - date;
+            const diffMins = Math.floor(diffMs / (1000 * 60));
+            const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+            const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+            if (diffMins < 1) return 'Just now';
+            if (diffMins < 60) return `${diffMins}m ago`;
+            if (diffHours < 24) return `${diffHours}h ago`;
+            if (diffDays < 7) return `${diffDays}d ago`;
+
+            return date.toLocaleDateString();
+        } catch (error) {
+            return timestamp;
+        }
+    }
+
+    async resolveAlert(alertId) {
+        try {
+            const response = await fetch(`http://localhost:3000/api/v1/alerts/${alertId}/resolve`, {
+                method: 'POST'
+            });
+
+            if (response.ok) {
+                this.showNotification('Alert resolved successfully!', 'success');
+                this.loadAlerts(); // Refresh the alerts list
+            } else {
+                throw new Error('Failed to resolve alert');
+            }
+        } catch (error) {
+            console.error('Failed to resolve alert:', error);
+            this.showNotification('Failed to resolve alert', 'error');
+        }
     }
 
     async loadSettings() {
@@ -1217,6 +1379,27 @@ class ArchGuardianDashboard {
                 this.updateGitHubConnectButton();
             });
         });
+    }
+
+    setupAlertsTabs() {
+        const alertsTabs = document.querySelectorAll('.alerts-tabs .tab-btn');
+        alertsTabs.forEach(tab => {
+            tab.addEventListener('click', () => {
+                const tabName = tab.dataset.tab;
+                this.switchAlertsTab(tabName);
+            });
+        });
+    }
+
+    switchAlertsTab(tab) {
+        // Remove active class from all tabs
+        document.querySelectorAll('.alerts-tabs .tab-btn').forEach(t => t.classList.remove('active'));
+
+        // Add active class to selected tab
+        document.querySelector(`.alerts-tabs [data-tab="${tab}"]`).classList.add('active');
+
+        // Reload alerts with new filter
+        this.loadAlerts();
     }
 
     setupModalConnectionTabs() {
@@ -1902,6 +2085,185 @@ style.textContent = `
     .settings-section .action-btn {
         margin-top: 1rem;
     }
+
+    /* Alerts View Styles */
+    .alerts-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 1.5rem;
+    }
+
+    .alerts-controls {
+        display: flex;
+        gap: 0.5rem;
+    }
+
+    .alerts-content {
+        margin-top: 1.5rem;
+    }
+
+    .alerts-tabs {
+        display: flex;
+        gap: 0.5rem;
+        margin-bottom: 1.5rem;
+        border-bottom: 1px solid var(--border-color);
+        padding-bottom: 0.5rem;
+    }
+
+    .alerts-container {
+        max-height: 70vh;
+        overflow-y: auto;
+    }
+
+    .alert-item {
+        background: var(--card-background);
+        border: 1px solid var(--border-color);
+        border-radius: 0.5rem;
+        padding: 1rem;
+        margin-bottom: 1rem;
+        color: var(--text-primary);
+        transition: all 0.2s;
+    }
+
+    .alert-item:hover {
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+
+    .alert-item.alert-info {
+        border-left: 4px solid var(--primary-color);
+    }
+
+    .alert-item.alert-warning {
+        border-left: 4px solid var(--warning-color);
+    }
+
+    .alert-item.alert-error, .alert-item.alert-critical {
+        border-left: 4px solid var(--error-color);
+    }
+
+    .alert-item.alert-success {
+        border-left: 4px solid var(--success-color);
+    }
+
+    .alert-resolved {
+        opacity: 0.7;
+        background: var(--card-background-secondary);
+    }
+
+    .alert-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 0.75rem;
+    }
+
+    .alert-meta {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        font-size: 0.875rem;
+        color: var(--text-secondary);
+    }
+
+    .alert-level {
+        padding: 0.25rem 0.5rem;
+        border-radius: 0.25rem;
+        font-size: 0.75rem;
+        font-weight: 600;
+        text-transform: uppercase;
+    }
+
+    .alert-level-info {
+        background: rgba(37,99,235,0.1);
+        color: var(--primary-color);
+    }
+
+    .alert-level-warning {
+        background: rgba(245,158,11,0.1);
+        color: var(--warning-color);
+    }
+
+    .alert-level-error, .alert-level-critical {
+        background: rgba(239,68,68,0.1);
+        color: var(--error-color);
+    }
+
+    .alert-level-success {
+        background: rgba(16,185,129,0.1);
+        color: var(--success-color);
+    }
+
+    .alert-timestamp {
+        font-size: 0.8rem;
+    }
+
+    .alert-status-resolved {
+        background: rgba(16,185,129,0.1);
+        color: var(--success-color);
+        padding: 0.25rem 0.5rem;
+        border-radius: 0.25rem;
+        font-size: 0.75rem;
+        font-weight: 600;
+    }
+
+    .alert-actions {
+        display: flex;
+        gap: 0.5rem;
+    }
+
+    .alert-resolve-btn {
+        background: var(--primary-color);
+        color: white;
+        border: none;
+        padding: 0.375rem 0.75rem;
+        border-radius: 0.25rem;
+        font-size: 0.875rem;
+        cursor: pointer;
+        transition: background 0.2s;
+    }
+
+    .alert-resolve-btn:hover {
+        background: var(--primary-color-dark);
+    }
+
+    .alert-title {
+        font-size: 1.125rem;
+        font-weight: 600;
+        margin-bottom: 0.5rem;
+        color: var(--text-primary);
+    }
+
+    .alert-description {
+        margin-bottom: 0.5rem;
+        color: var(--text-secondary);
+        line-height: 1.5;
+    }
+
+    .alert-details, .alert-source {
+        font-size: 0.875rem;
+        color: var(--text-secondary);
+        margin-bottom: 0.25rem;
+    }
+
+    .alert-source {
+        font-style: italic;
+    }
+
+    .clear-btn {
+        background: var(--text-secondary);
+        color: white;
+        border: none;
+        padding: 0.5rem 1rem;
+        border-radius: 0.25rem;
+        cursor: pointer;
+        font-weight: 500;
+        transition: background 0.2s;
+    }
+
+    .clear-btn:hover {
+        background: #6b7280;
+    }
 `;
 
 document.head.appendChild(style);
@@ -1921,6 +2283,9 @@ window.connectGitHubProject = function() { if (window.dashboard && typeof window
 window.authenticateGitHub = function() { if (window.dashboard && typeof window.dashboard.authenticateGitHub === 'function') window.dashboard.authenticateGitHub(); };
 window.loadProjects = function() { if (window.dashboard && typeof window.dashboard.loadProjects === 'function') window.dashboard.loadProjects(); };
 window.loadKnowledgeGraph = function() { if (window.dashboard && typeof window.dashboard.loadKnowledgeGraph === 'function') window.dashboard.loadKnowledgeGraph(); };
+window.loadAlerts = function() { if (window.dashboard && typeof window.dashboard.loadAlerts === 'function') window.dashboard.loadAlerts(); };
+window.clearResolvedAlerts = function() { if (window.dashboard && typeof window.dashboard.clearResolvedAlerts === 'function') window.dashboard.clearResolvedAlerts(); };
+window.resolveAlert = function(alertId) { if (window.dashboard && typeof window.dashboard.resolveAlert === 'function') window.dashboard.resolveAlert(alertId); };
 
 // Note: Folder browse buttons use inline onclick handlers to maintain user activation context
 // for the File System Access API. Event delegation would break this requirement.

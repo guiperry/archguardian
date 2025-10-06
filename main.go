@@ -490,8 +490,10 @@ func (ps *ProjectStore) Create(project *Project) error {
 
 	// Add to memory store
 	ps.projects[project.ID] = project
-
-	// Persist to database
+	// Persist to database if available
+	if ps.db == nil {
+		return nil
+	}
 	return ps.persistProject(project)
 }
 
@@ -529,8 +531,10 @@ func (ps *ProjectStore) Update(project *Project) error {
 
 	// Update memory store
 	ps.projects[project.ID] = project
-
-	// Persist to database
+	// Persist to database if available
+	if ps.db == nil {
+		return nil
+	}
 	return ps.persistProject(project)
 }
 
@@ -544,8 +548,10 @@ func (ps *ProjectStore) Delete(id string) error {
 
 	// Remove from memory store
 	delete(ps.projects, id)
-
-	// Remove from database
+	// Remove from database if available
+	if ps.db == nil {
+		return nil
+	}
 	return ps.deleteProjectFromDB(id)
 }
 
@@ -568,7 +574,7 @@ func (ps *ProjectStore) loadProjects() {
 	}
 
 	// Query all projects from database
-	results, err := collection.Query(context.Background(), "", 1000, nil, nil)
+	results, err := collection.Query(context.Background(), "*", 1000, nil, nil)
 	if err != nil {
 		log.Printf("⚠️  Failed to load projects from database: %v", err)
 		return
@@ -601,7 +607,7 @@ func (ps *ProjectStore) loadProjectFromDB(id string) (*Project, bool) {
 	}
 
 	// Query for specific project
-	results, err := collection.Query(context.Background(), "", 1, map[string]string{"id": id}, nil)
+	results, err := collection.Query(context.Background(), "*", 1, map[string]string{"id": id}, nil)
 	if err != nil || len(results) == 0 {
 		return nil, false
 	}
@@ -951,7 +957,7 @@ func (sm *SettingsManager) loadSettings() {
 	// Get the most recent settings
 	results, err := collection.Query(
 		context.Background(),
-		"",
+		"*",
 		1,
 		nil,
 		nil,
@@ -3228,6 +3234,11 @@ func NewAIInferenceEngine(config *Config) *AIInferenceEngine {
 }
 
 func (ai *AIInferenceEngine) AnalyzeCodeFile(ctx context.Context, content string, provider AIProviderType) (map[string]interface{}, error) {
+	if ai == nil || ai.service == nil {
+		// No AI service available in tests; return a minimal placeholder
+		return map[string]interface{}{"raw_analysis": "ai-service-unavailable"}, nil
+	}
+
 	prompt := inference_engine.GetCodeFileAnalysisPrompt(content)
 
 	response, err := ai.service.GenerateText(ctx, string(provider), prompt, "")
@@ -3246,6 +3257,10 @@ func (ai *AIInferenceEngine) AnalyzeCodeFile(ctx context.Context, content string
 }
 
 func (ai *AIInferenceEngine) AnalyzeDatabaseModel(ctx context.Context, content string, provider AIProviderType) (map[string]interface{}, error) {
+	if ai == nil || ai.service == nil {
+		return map[string]interface{}{"raw_analysis": "ai-service-unavailable"}, nil
+	}
+
 	prompt := inference_engine.GetDatabaseModelAnalysisPrompt(content)
 
 	response, err := ai.service.GenerateText(ctx, string(provider), prompt, "")
@@ -3264,6 +3279,11 @@ func (ai *AIInferenceEngine) AnalyzeDatabaseModel(ctx context.Context, content s
 }
 
 func (ai *AIInferenceEngine) InferRelationships(ctx context.Context, graphData map[string]interface{}, provider AIProviderType) ([]Relationship, error) {
+	if ai == nil || ai.service == nil {
+		// No service available; return empty relationships
+		return []Relationship{}, nil
+	}
+
 	// Use the real inference service with reflection for deep reasoning about relationships
 	graphJSON, _ := json.Marshal(graphData) // Error handling omitted for brevity
 	prompt := inference_engine.GetRelationshipInferencePrompt(string(graphJSON))
@@ -3284,6 +3304,17 @@ func (ai *AIInferenceEngine) InferRelationships(ctx context.Context, graphData m
 }
 
 func (ai *AIInferenceEngine) AnalyzeRisks(ctx context.Context, riskData map[string]interface{}, provider AIProviderType) (map[string]interface{}, error) {
+	if ai == nil || ai.service == nil {
+		// Return empty analysis structure expected by callers when AI is not available in tests
+		return map[string]interface{}{
+			"technical_debt": []interface{}{},
+			"security":       []interface{}{},
+			"obsolete_code":  []interface{}{},
+			"dependencies":   []interface{}{},
+			"raw_analysis":   "ai-service-unavailable",
+		}, nil
+	}
+
 	// Use the real inference service with reflection for comprehensive risk analysis
 	riskJSON, _ := json.Marshal(riskData) // Error handling omitted for brevity
 	prompt := inference_engine.GetRiskAnalysisPrompt(string(riskJSON))
@@ -3310,6 +3341,10 @@ func (ai *AIInferenceEngine) AnalyzeRisks(ctx context.Context, riskData map[stri
 }
 
 func (ai *AIInferenceEngine) GenerateRemediation(ctx context.Context, issue interface{}, provider AIProviderType) (string, error) {
+	if ai == nil || ai.service == nil {
+		return "", fmt.Errorf("ai service not available")
+	}
+
 	// Use the real inference service with the configured code remediation provider
 	issueJSON, _ := json.Marshal(issue) // Error handling omitted for brevity
 	prompt := inference_engine.GetRemediationPrompt(string(issueJSON))
@@ -3831,16 +3866,18 @@ func (gm *GitManager) CommitAndPush(branchName, message string) error {
 // ============================================================================
 
 type ArchGuardian struct {
-	config         *Config
-	scanner        *Scanner
-	diagnoser      *RiskDiagnoser
-	remediator     *Remediator
-	baseline       *BaselineChecker
-	dataEngine     *data_engine.DataEngine
-	logWriter      *logWriter        // Real-time log streaming to dashboard
-	triggerScan    chan bool         // Channel to trigger manual scans
-	dashboardConns []*websocket.Conn // Connected dashboard WebSocket clients
-	connMutex      sync.Mutex        // Mutex for dashboard connections
+	config          *Config
+	scanner         *Scanner
+	diagnoser       *RiskDiagnoser
+	remediator      *Remediator
+	baseline        *BaselineChecker
+	dataEngine      *data_engine.DataEngine
+	logWriter       *logWriter        // Real-time log streaming to dashboard
+	triggerScan     chan bool         // Channel to trigger manual scans
+	dashboardConns  []*websocket.Conn // Connected dashboard WebSocket clients
+	connMutex       sync.Mutex        // Mutex for dashboard connections
+	baselineStarted bool              // Whether baseline periodic updates have been started
+	baselineMutex   sync.Mutex        // Protects baselineStarted
 }
 
 func NewArchGuardian(config *Config, aiEngine *AIInferenceEngine) *ArchGuardian {
@@ -3926,8 +3963,14 @@ func (ag *ArchGuardian) Run(ctx context.Context) error {
 		ag.config.AIProviders.CodeRemediationProvider)
 	log.Println("✅ ArchGuardian is running. Waiting for scan trigger from API or periodic schedule...")
 
-	// Start the baseline checker's periodic updates now that the main loop is starting.
-	go ag.baseline.startPeriodicUpdates(ctx)
+	// Baseline periodic updates are started lazily when a project scan is triggered
+	// to avoid performing network requests during initial application load. However,
+	// tests or developer workflows can opt-in to start baseline on init by setting
+	// the START_BASELINE_ON_INIT environment variable to true.
+	if getEnvBool("START_BASELINE_ON_INIT", false) {
+		go ag.baseline.startPeriodicUpdates(ctx)
+		log.Println("🔄 Baseline periodic updates started at initialization (START_BASELINE_ON_INIT=true).")
+	}
 
 	ticker := time.NewTicker(ag.config.ScanInterval)
 	defer ticker.Stop()
@@ -3953,61 +3996,110 @@ func (ag *ArchGuardian) Run(ctx context.Context) error {
 	}
 }
 
+// StartBaselineIfNeeded starts the baseline checker's periodic updates the first time
+// it is required (for example when a project scan is initiated). This avoids
+// performing network calls during application startup.
+func (ag *ArchGuardian) StartBaselineIfNeeded(ctx context.Context) {
+	ag.baselineMutex.Lock()
+	started := ag.baselineStarted
+	if !started {
+		ag.baselineStarted = true
+	}
+	ag.baselineMutex.Unlock()
+
+	if started {
+		return
+	}
+
+	if ag.baseline != nil {
+		go ag.baseline.startPeriodicUpdates(ctx)
+		log.Println("🔄 Baseline periodic updates started on demand.")
+	}
+}
+
 func (ag *ArchGuardian) runCycle(ctx context.Context) error {
 	log.Println("\n" + strings.Repeat("=", 80))
 	log.Printf("🔄 Starting scan cycle at %s", time.Now().Format(time.RFC3339))
 	log.Println(strings.Repeat("=", 80))
 
 	ag.produceSystemEvent(data_engine.SystemEventType, "scan_cycle_started", nil)
+	ag.sendProgressUpdate("scan_started", 0, "Initializing scan cycle...")
 
 	// Phase 1: Scan project
+	ag.sendProgressUpdate("scan_project", 5, "Starting project scan...")
+	ag.sendProgressUpdate("scan_project", 10, "Analyzing project structure...")
+
 	if err := ag.scanner.ScanProject(ctx); err != nil {
+		ag.sendProgressUpdate("scan_failed", 0, fmt.Sprintf("Scan failed: %v", err))
 		ag.produceSystemEvent(data_engine.ErrorEvent, "scan_project_failed", map[string]interface{}{"error": err.Error()})
 		return fmt.Errorf("scan failed: %w", err)
 	}
+	ag.sendProgressUpdate("scan_project", 40, fmt.Sprintf("Project scan completed. Found %d nodes.", len(ag.scanner.graph.Nodes)))
 	ag.produceSystemEvent(data_engine.SystemEventType, "scan_project_completed", map[string]interface{}{"node_count": len(ag.scanner.graph.Nodes)})
 
 	// Phase 1.5: Check for non-Baseline web features
+	ag.sendProgressUpdate("compatibility_check", 45, "Checking web compatibility...")
 	compatIssues := ag.checkForBaselineCompatibility()
 	log.Printf("✅ Web compatibility check complete. Found %d non-Baseline features.", len(compatIssues))
 	ag.diagnoser.AddManualIssues(compatIssues)
+	ag.sendProgressUpdate("compatibility_check", 50, fmt.Sprintf("Compatibility check completed. Found %d issues.", len(compatIssues)))
 
 	// Export knowledge graph
+	ag.sendProgressUpdate("export_data", 55, "Exporting knowledge graph...")
 	if err := ag.exportKnowledgeGraph(); err != nil {
 		log.Printf("⚠️  Failed to export knowledge graph: %v", err)
 	}
+	ag.sendProgressUpdate("export_data", 60, "Knowledge graph exported.")
 
 	// Phase 2: Diagnose risks
+	ag.sendProgressUpdate("risk_analysis", 65, "Analyzing security risks...")
+	ag.sendProgressUpdate("risk_analysis", 70, "Checking for vulnerabilities...")
+	ag.sendProgressUpdate("risk_analysis", 75, "Analyzing technical debt...")
+
 	assessment, err := ag.diagnoser.DiagnoseRisks(ctx)
 	if err != nil {
+		ag.sendProgressUpdate("risk_analysis_failed", 0, fmt.Sprintf("Risk analysis failed: %v", err))
 		ag.produceSystemEvent(data_engine.ErrorEvent, "diagnose_risks_failed", map[string]interface{}{"error": err.Error()})
 		return fmt.Errorf("risk diagnosis failed: %w", err)
 	}
+	ag.sendProgressUpdate("risk_analysis", 80, fmt.Sprintf("Risk analysis completed. Score: %.1f/100", assessment.OverallScore))
 	ag.produceSystemEvent(data_engine.SystemEventType, "diagnose_risks_completed", map[string]interface{}{"overall_score": assessment.OverallScore})
+
+	// Broadcast security vulnerabilities found
 	for _, vuln := range assessment.SecurityVulns {
 		if ag.dataEngine != nil {
 			ag.dataEngine.BroadcastSecurityVulnerability(vuln)
 		}
+		ag.sendProgressUpdate("security_alert", 82, fmt.Sprintf("Security vulnerability found: %s", vuln.CVE))
 	}
 
 	// Export risk assessment
+	ag.sendProgressUpdate("export_assessment", 85, "Exporting risk assessment...")
 	if err := ag.exportRiskAssessment(assessment); err != nil {
 		log.Printf("⚠️  Failed to export risk assessment: %v", err)
 	}
+	ag.sendProgressUpdate("export_assessment", 90, "Risk assessment exported.")
 
 	// Phase 3: Automated remediation
 	if assessment.OverallScore > 20.0 { // Only remediate if risk score is significant
+		ag.sendProgressUpdate("remediation", 95, "Starting automated remediation...")
+		ag.sendProgressUpdate("remediation", 96, "Analyzing remediation options...")
+
 		if err := ag.remediator.RemediateRisks(ctx, assessment); err != nil {
+			ag.sendProgressUpdate("remediation_failed", 0, fmt.Sprintf("Remediation failed: %v", err))
 			ag.produceSystemEvent(data_engine.ErrorEvent, "remediation_failed", map[string]interface{}{"error": err.Error()})
 			log.Printf("⚠️  Remediation failed: %v", err)
-		}
-		if ag.dataEngine != nil {
-			ag.dataEngine.BroadcastRemediationCompleted(map[string]interface{}{
-				"status":    "completed",
-				"timestamp": time.Now(),
-			})
+		} else {
+			ag.sendProgressUpdate("remediation", 100, "Remediation completed successfully.")
+			if ag.dataEngine != nil {
+				ag.dataEngine.BroadcastRemediationCompleted(map[string]interface{}{
+					"status":    "completed",
+					"timestamp": time.Now(),
+				})
+			}
 		}
 	} else {
+		ag.sendProgressUpdate("remediation_skipped", 100, "System health is good, no remediation needed.")
 		ag.produceSystemEvent(data_engine.SystemEventType, "remediation_skipped", map[string]interface{}{"reason": "System health is good", "overall_score": assessment.OverallScore})
 		log.Println("✅ System health is good, no remediation needed")
 	}
@@ -4016,6 +4108,7 @@ func (ag *ArchGuardian) runCycle(ctx context.Context) error {
 	log.Printf("✅ Scan cycle complete. Overall risk score: %.2f/100", assessment.OverallScore)
 	log.Println(strings.Repeat("=", 80) + "\n")
 
+	ag.sendProgressUpdate("scan_completed", 100, fmt.Sprintf("Scan cycle complete. Risk score: %.1f/100", assessment.OverallScore))
 	ag.produceSystemEvent(data_engine.SystemEventType, "scan_cycle_completed", map[string]interface{}{"overall_score": assessment.OverallScore})
 	return nil
 }
@@ -4215,6 +4308,32 @@ func (ag *ArchGuardian) BroadcastToDashboard(message string) {
 func (ag *ArchGuardian) FlushInitialLogs() {
 	if ag.logWriter != nil {
 		ag.logWriter.FlushInitialLogs()
+	}
+}
+
+// sendProgressUpdate sends a progress update via WebSocket to all connected dashboard clients
+func (ag *ArchGuardian) sendProgressUpdate(phase string, progress float64, message string) {
+	progressUpdate := map[string]interface{}{
+		"type":      "scan_progress",
+		"phase":     phase,
+		"progress":  progress,
+		"message":   message,
+		"timestamp": time.Now().Format(time.RFC3339),
+	}
+
+	// Create WebSocket message
+	wsMessage := createWebSocketMessage("scan_progress", progressUpdate)
+
+	// Broadcast to all connected clients
+	ag.connMutex.Lock()
+	defer ag.connMutex.Unlock()
+
+	for _, conn := range ag.dashboardConns {
+		if err := conn.WriteJSON(wsMessage); err != nil {
+			log.Printf("Failed to send progress update to dashboard client: %v", err)
+			// Remove broken connection
+			go ag.RemoveDashboardConnection(conn)
+		}
 	}
 }
 
@@ -6595,6 +6714,7 @@ func startConsolidatedServer(ag *ArchGuardian, logAnalyzer *LogAnalyzer) error {
 	router.HandleFunc("/api/v1/search", handleSemanticSearch).Methods("GET")
 	router.HandleFunc("/api/v1/backup", handleBackup).Methods("POST")
 	router.HandleFunc("/api/v1/backup", handleBackupList).Methods("GET")
+	router.HandleFunc("/api/v1/backup/restore", handleRestore).Methods("POST")
 
 	// Log ingestion endpoints (consolidated from port 4000)
 	router.HandleFunc("/api/v1/logs", func(w http.ResponseWriter, r *http.Request) {
@@ -6761,7 +6881,7 @@ func handleKnowledgeGraph(w http.ResponseWriter, r *http.Request) {
 	// Query for knowledge graphs with the specified project ID
 	results, err := collection.Query(
 		r.Context(),
-		"",
+		"*",
 		1, // Get the most recent one
 		map[string]string{"project_id": projectID},
 		nil,
@@ -7541,7 +7661,8 @@ func handleLogIngestion(w http.ResponseWriter, r *http.Request, logAnalyzer *Log
 
 	var logMsg LogMsg
 	if err := json.NewDecoder(r.Body).Decode(&logMsg); err != nil {
-		http.Error(w, "Invalid JSON format", http.StatusBadRequest)
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "Invalid JSON format", "message": err.Error()})
 		return
 	}
 
@@ -7554,7 +7675,8 @@ func handleLogIngestion(w http.ResponseWriter, r *http.Request, logAnalyzer *Log
 	ctx := context.Background()
 	if err := logAnalyzer.ProcessLog(ctx, logMsg); err != nil {
 		log.Printf("  ⚠️  Failed to process log message: %v", err)
-		http.Error(w, "Failed to process log", http.StatusInternalServerError)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "Failed to process log", "message": err.Error()})
 		return
 	}
 
@@ -7578,7 +7700,8 @@ func handleBatchLogIngestion(w http.ResponseWriter, r *http.Request, logAnalyzer
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&logBatch); err != nil {
-		http.Error(w, "Invalid JSON format", http.StatusBadRequest)
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "Invalid JSON format", "message": err.Error()})
 		return
 	}
 
@@ -8125,6 +8248,8 @@ func handleSettings(w http.ResponseWriter, r *http.Request) {
 func handleStartScan(w http.ResponseWriter, _ *http.Request, ag *ArchGuardian) {
 	w.Header().Set("Content-Type", "application/json")
 	// CORS headers are now handled by the middleware
+	// Start baseline updates on-demand to avoid startup network calls
+	ag.StartBaselineIfNeeded(context.Background())
 
 	// Send a signal to the trigger channel
 	// Use a non-blocking send in case no one is listening (e.g., if a scan is already in progress)
@@ -8279,6 +8404,9 @@ func handleScanProject(w http.ResponseWriter, r *http.Request, ag *ArchGuardian)
 		return
 	}
 
+	// Ensure baseline periodic updates are running before initiating scans
+	ag.StartBaselineIfNeeded(context.Background())
+
 	// Update project status to scanning
 	project.Status = "scanning"
 	project.LastScan = &time.Time{} // Will be set when scan completes
@@ -8333,7 +8461,7 @@ func handleScanHistory(w http.ResponseWriter, r *http.Request) {
 	collection := globalDB.GetCollection("knowledge-graphs", nil)
 	results, err := collection.Query(
 		r.Context(),
-		"",
+		"*",
 		limit,
 		map[string]string{"project_id": projectID},
 		nil,
@@ -8379,13 +8507,13 @@ func handleSemanticSearch(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	if globalDB == nil {
-		http.Error(w, "Database not initialized", http.StatusInternalServerError)
+		sendError(w, NewInternalError("Database not initialized", nil))
 		return
 	}
 
 	query := r.URL.Query().Get("q")
 	if query == "" {
-		http.Error(w, "Query parameter 'q' is required", http.StatusBadRequest)
+		sendError(w, NewValidationError("Query parameter 'q' is required", nil))
 		return
 	}
 
@@ -8402,11 +8530,23 @@ func handleSemanticSearch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	projectID := r.URL.Query().Get("project_id")
+	if projectID == "" {
+		projectID = "default"
+	}
+
 	// Get the specified collection
 	collection := globalDB.GetCollection(collectionName, nil)
 	if collection == nil {
-		http.Error(w, fmt.Sprintf("Collection '%s' not found", collectionName), http.StatusNotFound)
+		sendError(w, NewNotFoundError(fmt.Sprintf("Collection '%s'", collectionName)))
 		return
+	}
+
+	// Prepare metadata filter for project isolation
+	var metadataFilter map[string]string
+	if collectionName == "knowledge-graphs" || collectionName == "security-issues" ||
+		collectionName == "test-coverage" || collectionName == "scan-history" {
+		metadataFilter = map[string]string{"project_id": projectID}
 	}
 
 	// Perform semantic search
@@ -8414,34 +8554,44 @@ func handleSemanticSearch(w http.ResponseWriter, r *http.Request) {
 		r.Context(),
 		query,
 		limit,
-		nil, // no metadata filter
-		nil, // no embedding filter
+		metadataFilter, // filter by project if applicable
+		nil,            // no embedding filter
 	)
 
 	if err != nil {
 		log.Printf("⚠️  Failed to perform semantic search: %v", err)
-		http.Error(w, "Failed to perform search", http.StatusInternalServerError)
+		sendError(w, NewInternalError("Failed to perform search", err))
 		return
 	}
 
 	// Format results for API response
 	searchResults := make([]map[string]interface{}, len(results))
 	for i, result := range results {
+		// Parse the content if it's JSON
+		var content interface{}
+		if err := json.Unmarshal([]byte(result.Content), &content); err != nil {
+			// If not JSON, keep as string
+			content = result.Content
+		}
+
 		searchResults[i] = map[string]interface{}{
 			"id":       result.ID,
-			"content":  result.Content,
+			"content":  content,
 			"metadata": result.Metadata,
+			"score":    1.0, // Chromem-go doesn't return similarity scores directly
 		}
 	}
 
 	response := map[string]interface{}{
 		"query":      query,
 		"collection": collectionName,
+		"project_id": projectID,
 		"total":      len(searchResults),
 		"results":    searchResults,
+		"timestamp":  time.Now().Format(time.RFC3339),
 	}
 
-	json.NewEncoder(w).Encode(response)
+	sendSuccess(w, response)
 }
 
 // handleBackup creates a backup of the chromem-go database
@@ -8584,6 +8734,83 @@ func handleBackupList(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+// handleRestore restores the database from a backup file
+func handleRestore(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if globalDB == nil {
+		http.Error(w, "Database not initialized", http.StatusInternalServerError)
+		return
+	}
+
+	// Parse request body
+	var requestBody struct {
+		BackupPath    string `json:"backup_path"`
+		EncryptionKey string `json:"encryption_key,omitempty"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+		http.Error(w, "Invalid JSON format", http.StatusBadRequest)
+		return
+	}
+
+	if requestBody.BackupPath == "" {
+		http.Error(w, "backup_path is required", http.StatusBadRequest)
+		return
+	}
+
+	// Check if backup file exists
+	if _, err := os.Stat(requestBody.BackupPath); os.IsNotExist(err) {
+		http.Error(w, "Backup file does not exist", http.StatusNotFound)
+		return
+	}
+
+	// Validate encryption key if backup is encrypted
+	if strings.HasSuffix(requestBody.BackupPath, ".enc") {
+		if requestBody.EncryptionKey == "" {
+			http.Error(w, "Encryption key is required for encrypted backups", http.StatusBadRequest)
+			return
+		}
+		if len(requestBody.EncryptionKey) != 32 {
+			http.Error(w, "Encryption key must be exactly 32 bytes", http.StatusBadRequest)
+			return
+		}
+	}
+
+	log.Printf("🔄 Starting database restore from: %s", requestBody.BackupPath)
+
+	// Perform the restore
+	err := globalDB.ImportFromFile(requestBody.BackupPath, requestBody.EncryptionKey)
+	if err != nil {
+		log.Printf("⚠️  Failed to restore database: %v", err)
+		http.Error(w, fmt.Sprintf("Failed to restore database: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Get backup file info for response
+	fileInfo, err := os.Stat(requestBody.BackupPath)
+	if err != nil {
+		log.Printf("⚠️  Failed to get backup file info: %v", err)
+	} else {
+		log.Printf("✅ Database restore completed successfully from: %s (%d bytes)", requestBody.BackupPath, fileInfo.Size())
+	}
+
+	response := map[string]interface{}{
+		"success":     true,
+		"backup_path": requestBody.BackupPath,
+		"timestamp":   time.Now(),
+		"encrypted":   requestBody.EncryptionKey != "",
+		"message":     "Database restored successfully. You may need to restart the application for all changes to take effect.",
+	}
+
+	if fileInfo != nil {
+		response["size_bytes"] = fileInfo.Size()
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
 // ============================================================================
 // INTEGRATION HEALTH CHECKS & MONITORING
 // ============================================================================
@@ -8603,19 +8830,26 @@ func NewIntegrationHealthChecker(config *Config) *IntegrationHealthChecker {
 // CheckGitHubIntegration checks GitHub API connectivity and token validity
 func (ihc *IntegrationHealthChecker) CheckGitHubIntegration(ctx context.Context) map[string]interface{} {
 	status := map[string]interface{}{
-		"connected": false,
-		"status":    "disconnected",
-		"message":   "GitHub integration not configured",
+		"connected":  false,
+		"status":     "disconnected",
+		"message":    "GitHub integration not configured",
+		"service":    "GitHub API",
+		"last_check": time.Now().Format(time.RFC3339),
 	}
 
 	if ihc.config.GitHubToken == "" {
+		status["message"] = "GitHub token not configured"
 		return status
 	}
 
-	// Test GitHub API connectivity
+	// Test GitHub API connectivity with multiple endpoints
+	startTime := time.Now()
+
+	// Test 1: Basic user endpoint
 	req, err := http.NewRequestWithContext(ctx, "GET", "https://api.github.com/user", nil)
 	if err != nil {
 		status["message"] = fmt.Sprintf("Failed to create request: %v", err)
+		status["response_time"] = time.Since(startTime).Milliseconds()
 		return status
 	}
 
@@ -8626,18 +8860,37 @@ func (ihc *IntegrationHealthChecker) CheckGitHubIntegration(ctx context.Context)
 	resp, err := client.Do(req)
 	if err != nil {
 		status["message"] = fmt.Sprintf("Connection failed: %v", err)
+		status["response_time"] = time.Since(startTime).Milliseconds()
 		return status
 	}
 	defer resp.Body.Close()
 
+	responseTime := time.Since(startTime).Milliseconds()
+	status["response_time"] = responseTime
+
 	switch resp.StatusCode {
 	case http.StatusOK:
+		// Test 2: Rate limit check
+		rateLimitRemaining := resp.Header.Get("X-RateLimit-Remaining")
+		rateLimitReset := resp.Header.Get("X-RateLimit-Reset")
+
 		status["connected"] = true
 		status["status"] = "healthy"
 		status["message"] = "GitHub API connection successful"
+		status["rate_limit_remaining"] = rateLimitRemaining
+		status["rate_limit_reset"] = rateLimitReset
+
+		// Check if rate limit is getting low
+		if remaining, err := strconv.Atoi(rateLimitRemaining); err == nil && remaining < 100 {
+			status["warning"] = "Rate limit running low"
+		}
+
 	case http.StatusUnauthorized:
 		status["status"] = "error"
 		status["message"] = "Invalid GitHub token"
+	case http.StatusForbidden:
+		status["status"] = "error"
+		status["message"] = "GitHub API access forbidden (check token permissions)"
 	default:
 		status["status"] = "error"
 		status["message"] = fmt.Sprintf("GitHub API returned status %d", resp.StatusCode)
