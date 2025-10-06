@@ -3,6 +3,7 @@ package data_engine
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -166,7 +167,11 @@ func (d *DataEngine) Start() error {
 		// Start REST API server
 		err := d.restAPI.Start()
 		if err != nil {
-			return fmt.Errorf("failed to start REST API server: %w", err)
+			log.Printf("⚠️  Failed to start REST API server: %v", err)
+			// Don't fail the entire startup for REST API issues
+			d.restAPI = nil
+		} else {
+			log.Printf("✅ REST API server started on port %d", d.config.RESTAPIPort)
 		}
 	}
 

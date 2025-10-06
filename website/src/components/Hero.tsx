@@ -38,9 +38,11 @@ const Hero = () => {
                   <ArrowRight className="ml-2 h-5 w-5 group-hover:translate-x-1 transition-transform" />
                 </a>
               </Button>
-              <Button size="lg" variant="outline" className="border-primary/50 hover:bg-primary/10">
-                <Github className="mr-2 h-5 w-5" />
-                View on GitHub
+              <Button asChild size="lg" variant="outline" className="border-primary/50 hover:bg-primary/10">
+                <a href="https://github.com/guiperry/archguardian" target="_blank" rel="noopener noreferrer">
+                  <Github className="mr-2 h-5 w-5" />
+                  View on GitHub
+                </a>
               </Button>
             </div>
             

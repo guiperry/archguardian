@@ -113,6 +113,7 @@ type RiskAssessment struct {
 	SecurityVulns         []SecurityVulnerability
 	ObsoleteCode          []ObsoleteCodeItem
 	DangerousDependencies []DependencyRisk
+	CompatibilityIssues   []TechnicalDebtItem
 	OverallScore          float64
 	Timestamp             time.Time
 }

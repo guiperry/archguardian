@@ -138,17 +138,7 @@ func (s *InferenceService) StartWithConfig(attemptConfigs []LLMAttemptConfig, pl
 		log.Printf("[WARN] InferenceService: Initial MOA configuration failed: %v. MOA features disabled.", err)
 	}
 
-	// --- Create the Task Orchestrator ---
-	s.orchestrator = NewTaskOrchestrator(s.delegator, plannerModel, executorModels, finalizerModel, verifierModel)
-	if s.orchestrator == nil {
-		return fmt.Errorf("failed to create task orchestrator")
-	}
-	log.Println("InferenceService: TaskOrchestrator created.")
-
-	// Now that the orchestrator exists, link it to the strategist.
-	s.contextStrategist.orchestrator = s.orchestrator
-
-	// Create the Delegator Service
+	// Create the Delegator Service first (required for TaskOrchestrator)
 	delegatorTokenLimit := s.primaryAttempts[0].Config.MaxTokens
 	delegatorTokenModel := s.primaryAttempts[0].Config.ModelName
 	s.delegator = NewDelegatorService(s.primaryAttempts, s.fallbackAttempts, delegatorTokenLimit, delegatorTokenModel, s.moa, s.contextStrategist)
@@ -159,6 +149,17 @@ func (s *InferenceService) StartWithConfig(attemptConfigs []LLMAttemptConfig, pl
 		return fmt.Errorf("failed to create delegator service")
 	}
 	log.Println("InferenceService: DelegatorService created.")
+
+	// --- Create the Task Orchestrator ---
+	s.orchestrator = NewTaskOrchestrator(s.delegator, plannerModel, executorModels, finalizerModel, verifierModel)
+	if s.orchestrator == nil {
+		return fmt.Errorf("failed to create task orchestrator")
+	}
+	log.Println("InferenceService: TaskOrchestrator created.")
+
+	// Now that the orchestrator exists, link it to the strategist.
+	s.contextStrategist.orchestrator = s.orchestrator
+
 
 	s.isRunning = true
 	log.Println("InferenceService: Started successfully with dynamic configuration.")

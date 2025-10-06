@@ -16,15 +16,22 @@ class ArchGuardianDashboard {
 
     init() {
         this.loadThemePreference();
+        this.checkProjectStarted();
         this.setupNavigation();
         this.setupWebSocket();
         this.loadInitialData();
         this.setupCharts();
-        this.loadProjects(); // Load projects on initial load
         this.setupConnectionTabs();
         this.setupThemeToggle();
         // Print an initialization message to the dashboard console
         try { this.appendConsoleLog('Dashboard initialized'); } catch (e) { /* silent */ }
+    }
+    checkProjectStarted() {
+        // Check if a project was previously started
+        if (localStorage.getItem('projectStarted') === 'true') {
+            this.projectStarted = true;
+            this.showProjectNavigation();
+        }
     }
 
     setupNavigation() {
@@ -36,14 +43,6 @@ class ArchGuardianDashboard {
             });
         });
 
-        // Setup issues tabs
-        const tabBtns = document.querySelectorAll('.tab-btn');
-        tabBtns.forEach(btn => {
-            btn.addEventListener('click', () => {
-                const tab = btn.dataset.tab;
-                this.switchTab(tab);
-            });
-        });
     }
 
     switchView(view) {
@@ -63,33 +62,57 @@ class ArchGuardianDashboard {
 
         // Load view-specific data
         this.loadViewData(view);
-        if (view === 'projects') {
-            this.loadProjects();
+        if (view === 'settings') {
+            this.loadSettings();
         }
     }
 
-    switchTab(tab) {
-        // Remove active class from all tabs
-        document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+    setupWebSocket() {
+        this.wsState = 'disconnected'; // 'disconnected', 'connecting', 'connected'
+        this.reconnectAttempts = 0;
+        this.maxReconnectAttempts = 5;
+        this.reconnectDelay = 1000; // Start with 1 second
+        this.maxReconnectDelay = 30000; // Max 30 seconds
+        this.messageQueue = []; // Queue messages during disconnect
+        this.heartbeatInterval = null;
 
-        // Add active class to selected tab
-        document.querySelector(`[data-tab="${tab}"]`).classList.add('active');
-
-        // Load tab data
-        this.loadIssuesData(tab);
+        this.connectWebSocket();
     }
 
-    setupWebSocket() {
-        // Connect to ArchGuardian's WebSocket server
-        this.ws = new WebSocket(`ws://localhost:3000/ws`);
+    connectWebSocket() {
+        if (this.ws && (this.ws.readyState === WebSocket.CONNECTING || this.ws.readyState === WebSocket.OPEN)) {
+            return; // Already connecting or connected
+        }
+
+        this.wsState = 'connecting';
+        this.updateConnectionStatus();
+
+        try {
+            this.ws = new WebSocket(`ws://localhost:3000/ws`);
+        } catch (error) {
+            console.error('Failed to create WebSocket:', error);
+            this.handleConnectionError();
+            return;
+        }
 
         this.ws.onopen = () => {
             console.log('Connected to ArchGuardian WebSocket');
+            this.wsState = 'connected';
+            this.reconnectAttempts = 0;
+            this.reconnectDelay = 1000; // Reset delay
+            this.updateConnectionStatus();
+
+            // Start heartbeat
+            this.startHeartbeat();
+
             // Notify the backend that the client is ready to receive initial logs
             this.appendConsoleLog('WebSocket connected');
             try {
                 this.ws.send(JSON.stringify({ type: 'client_ready' }));
                 this.appendConsoleLog('Sent client_ready to server');
+
+                // Flush any queued messages
+                this.flushMessageQueue();
             } catch (e) {
                 console.error('Failed to send client_ready:', e);
                 this.appendConsoleLog('Failed to send client_ready');
@@ -97,8 +120,12 @@ class ArchGuardianDashboard {
         };
 
         this.ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            this.handleWebSocketMessage(data);
+            try {
+                const data = JSON.parse(event.data);
+                this.handleWebSocketMessage(data);
+            } catch (error) {
+                console.error('Failed to parse WebSocket message:', error);
+            }
         };
 
         this.ws.onerror = (error) => {
@@ -108,8 +135,141 @@ class ArchGuardianDashboard {
 
         this.ws.onclose = (ev) => {
             console.warn('WebSocket closed', ev);
-            this.appendConsoleLog('WebSocket closed');
+            this.wsState = 'disconnected';
+            this.updateConnectionStatus();
+
+            // Stop heartbeat
+            this.stopHeartbeat();
+
+            this.appendConsoleLog('WebSocket disconnected');
+
+            // Attempt to reconnect if not intentionally closed
+            if (ev.code !== 1000 && this.reconnectAttempts < this.maxReconnectAttempts) {
+                this.scheduleReconnect();
+            } else if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+                this.appendConsoleLog('Max reconnection attempts reached. Please refresh the page.');
+                this.showNotification('Connection lost. Please refresh the page.', 'error');
+            }
         };
+    }
+
+    handleConnectionError() {
+        this.wsState = 'disconnected';
+        this.updateConnectionStatus();
+
+        if (this.reconnectAttempts < this.maxReconnectAttempts) {
+            this.scheduleReconnect();
+        }
+    }
+
+    scheduleReconnect() {
+        this.reconnectAttempts++;
+        const delay = Math.min(this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1), this.maxReconnectDelay);
+
+        this.appendConsoleLog(`Attempting to reconnect (${this.reconnectAttempts}/${this.maxReconnectAttempts}) in ${delay/1000}s...`);
+
+        setTimeout(() => {
+            this.connectWebSocket();
+        }, delay);
+    }
+
+    startHeartbeat() {
+        this.heartbeatInterval = setInterval(() => {
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                try {
+                    this.ws.send(JSON.stringify({ type: 'ping' }));
+                } catch (error) {
+                    console.error('Failed to send heartbeat:', error);
+                }
+            }
+        }, 30000); // Send ping every 30 seconds
+    }
+
+    stopHeartbeat() {
+        if (this.heartbeatInterval) {
+            clearInterval(this.heartbeatInterval);
+            this.heartbeatInterval = null;
+        }
+    }
+
+    updateConnectionStatus() {
+        const statusElement = document.getElementById('connection-status');
+        if (!statusElement) return;
+
+        let statusText = '';
+        let statusClass = '';
+
+        switch (this.wsState) {
+            case 'connected':
+                statusText = '🟢 Connected';
+                statusClass = 'connected';
+                break;
+            case 'connecting':
+                statusText = '🟡 Connecting...';
+                statusClass = 'connecting';
+                break;
+            case 'disconnected':
+                statusText = '🔴 Disconnected';
+                statusClass = 'disconnected';
+                break;
+        }
+
+        statusElement.textContent = statusText;
+        statusElement.className = `connection-status ${statusClass}`;
+
+        // Show reconnection info if attempting to reconnect
+        if (this.wsState === 'disconnected' && this.reconnectAttempts > 0) {
+            statusElement.textContent += ` (Attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`;
+        }
+    }
+
+    queueMessage(message) {
+        // Queue messages when disconnected
+        if (this.wsState !== 'connected') {
+            this.messageQueue.push(message);
+            if (this.messageQueue.length > 100) {
+                this.messageQueue.shift(); // Remove oldest message if queue gets too large
+            }
+        }
+    }
+
+    flushMessageQueue() {
+        if (this.messageQueue.length === 0) return;
+
+        this.appendConsoleLog(`Flushing ${this.messageQueue.length} queued messages...`);
+
+        // Send queued messages
+        while (this.messageQueue.length > 0) {
+            const message = this.messageQueue.shift();
+            try {
+                this.ws.send(message);
+            } catch (error) {
+                console.error('Failed to send queued message:', error);
+                // Put message back in queue for retry
+                this.messageQueue.unshift(message);
+                break;
+            }
+        }
+    }
+
+    // Override send method to queue messages when disconnected
+    sendWebSocketMessage(type, data) {
+        const message = JSON.stringify({
+            type: type,
+            data: data,
+            timestamp: new Date().toISOString()
+        });
+
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            try {
+                this.ws.send(message);
+            } catch (error) {
+                console.error('Failed to send WebSocket message:', error);
+                this.queueMessage(message);
+            }
+        } else {
+            this.queueMessage(message);
+        }
     }
 
     handleWebSocketMessage(data) {
@@ -147,39 +307,161 @@ class ArchGuardianDashboard {
         }
     }
 
-    async loadProjects() {
-        try {
-            const response = await fetch('http://localhost:3000/api/v1/projects');
-            const projects = await response.json();
-            this.renderProjects(projects || []);
-        } catch (error) {
-            console.error('Failed to load projects:', error);
-            document.getElementById('projects-list').innerHTML = '<div class="error">Failed to load projects.</div>';
+    openProjectsModal() {
+        const modal = document.getElementById('projects-modal');
+        if (modal) {
+            // Setup listeners specifically for the modal's tabs
+            this.setupModalConnectionTabs();
+            modal.style.display = 'flex';
+            this.loadProjects();
+            this.checkGitHubAuthStatus(); // Check auth status when modal opens
         }
     }
 
-    renderProjects(projects) {
-        const container = document.getElementById('projects-list');
-        if (projects.length === 0) {
+    closeProjectsModal() {
+        const modal = document.getElementById('projects-modal');
+        if (modal) {
+            modal.style.display = 'none';
+        }
+    }
+    async loadProjects() {
+        try {
+            // show spinner in modal if present
+            const modalList = document.getElementById('modal-projects-list');
+            if (modalList) modalList.innerHTML = '<div class="projects-spinner">Loading projects...</div>';
+            const response = await fetch('http://localhost:3000/api/v1/projects');
+            const projects = await response.json();
+            // Render projects in both the main projects view and the modal (if open)
+            this.renderProjects(projects || [], '#projects-list');
+            this.renderProjects(projects || [], '#modal-projects-list');
+        } catch (error) {
+            console.error('Failed to load projects:', error);
+            const mainList = document.getElementById('projects-list');
+            if (mainList) mainList.innerHTML = '<div class="error">Failed to load projects.</div>';
+            const modalList = document.getElementById('modal-projects-list');
+            if (modalList) modalList.innerHTML = '<div class="error">Failed to load projects.</div>';
+        }
+    }
+
+    renderProjects(projects, targetSelector = '#projects-list') {
+        const container = document.querySelector(targetSelector);
+        if (!container) return;
+
+        if (!projects || projects.length === 0) {
             container.innerHTML = '<div class="no-issues">No projects connected yet.</div>';
             return;
         }
 
         container.innerHTML = projects.map(p => `
-            <div class="project-card">
-                <h4>${p.name}</h4>
+            <div class="project-card${this.currentProjectId === p.id ? ' project-active' : ''}" data-project-id="${p.id}">
+                <div class="project-card-header">
+                    <h4>${p.name}</h4>
+                    <span class="project-badge project-badge-${(p.status === 'scanning' ? 'active' : 'idle')}">${p.status === 'scanning' ? 'Active' : 'Idle'}</span>
+                </div>
                 <p class="project-path">${p.path}</p>
-                <div class="project-status">Status: <span class="status-${p.status.toLowerCase()}">${p.status}</span></div>
+                <div class="project-status">Status: <span class="status-${(p.status || 'idle').toLowerCase()}">${p.status || 'idle'}</span></div>
+                <div class="project-ingest" data-project-id="${p.id}">Checking ingestion...</div>
                 <div class="project-buttons">
-                    <button class="start-scan-btn" onclick="window.dashboard.startScan('${p.id}')" ${p.status === 'scanning' ? 'disabled' : ''}>
-                        ${p.status === 'scanning' ? 'Scanning...' : 'Start'}
+                    <button class="start-scan-btn" data-project-id="${p.id}" ${p.status === 'scanning' ? 'disabled' : ''}>
+                        <span class="btn-spinner" aria-hidden="true"></span>
+                        <span class="btn-label">${p.status === 'scanning' ? 'Scanning...' : 'Start'}</span>
                     </button>
-                    <button class="stop-scan-btn" onclick="window.dashboard.stopScan('${p.id}')" ${p.status !== 'scanning' ? 'disabled' : ''}>
+                    <button class="stop-scan-btn" data-project-id="${p.id}" ${p.status !== 'scanning' ? 'disabled' : ''}>
                         Stop
                     </button>
                 </div>
             </div>
         `).join('');
+
+        // Attach event listeners for new buttons within the container
+        container.querySelectorAll('.start-scan-btn').forEach(btn => {
+            btn.addEventListener('click', (ev) => {
+                const id = btn.dataset.projectId;
+                // Close modal if the button is inside it
+                const modal = document.getElementById('projects-modal');
+                if (modal && modal.style.display === 'flex') {
+                    // Start scan and navigate to issues for that project
+                    this.startScan(id, btn).then(() => this.closeProjectsModal());
+                } else {
+                    this.startScan(id, btn);
+                }
+            });
+        });
+
+        container.querySelectorAll('.stop-scan-btn').forEach(btn => {
+            btn.addEventListener('click', (ev) => {
+                const id = btn.dataset.projectId;
+                this.stopScan(id);
+            });
+        });
+        // If there is a current active project, update labels
+        if (this.currentProjectId) this.updateActiveProjectUI(this.currentProjectId);
+
+        // Kick off ingestion checks for projects rendered in this container
+        try {
+            const items = projects || [];
+            items.forEach(p => {
+                // Only check ingestion for projects in the modal or main list
+                this.checkProjectIngested(p.id);
+            });
+        } catch (e) {
+            // ignore
+        }
+    }
+
+    // Check whether a given project has scan history (i.e., ingested into DB)
+    async checkProjectIngested(projectId) {
+        try {
+            const resp = await fetch(`/api/v1/scans/history?project_id=${encodeURIComponent(projectId)}&limit=1`);
+            if (!resp.ok) {
+                // can't determine, show unknown
+                const el = document.querySelector(`.project-ingest[data-project-id="${projectId}"]`);
+                if (el) el.textContent = 'Ingestion: unknown';
+                return;
+            }
+
+            const data = await resp.json();
+            const el = document.querySelector(`.project-ingest[data-project-id="${projectId}"]`);
+            if (!el) return;
+
+            if (data && data.total && data.total > 0) {
+                el.innerHTML = '<span class="ingested">Ingested</span>';
+            } else {
+                el.innerHTML = '<span class="not-ingested">No scans yet</span> <button class="ingest-now-btn">Ingest Now</button>';
+                const btn = el.querySelector('.ingest-now-btn');
+                if (btn) {
+                    btn.addEventListener('click', () => {
+                        // call startScan for the project, show inline spinner on this button
+                        this.startScan(projectId, btn);
+                    });
+                }
+            }
+        } catch (error) {
+            const el = document.querySelector(`.project-ingest[data-project-id="${projectId}"]`);
+            if (el) el.textContent = 'Ingestion: error';
+        }
+    }
+
+    updateActiveProjectUI(projectId) {
+        // Update nav label
+        const label = document.getElementById('active-project-label');
+        const issuesLabel = document.getElementById('active-issues-project');
+        // Try to find project name from the DOM lists
+        let name = null;
+        const card = document.querySelector(`[data-project-id=\"${projectId}\"]`);
+        if (card) {
+            name = card.querySelector('h4')?.textContent || name;
+        }
+        if (!name) name = projectId;
+
+        if (label) label.textContent = name;
+        if (issuesLabel) issuesLabel.textContent = name;
+
+        // Highlight active project cards across lists
+        document.querySelectorAll('.project-card').forEach(c => {
+            if (c.dataset.projectId === projectId) c.classList.add('project-active');
+            else c.classList.remove('project-active');
+        });
     }
 
     async addProject() {
@@ -205,6 +487,14 @@ class ArchGuardianDashboard {
 
             this.showNotification('Project added successfully!', 'success');
             document.getElementById('project-path').value = ''; // Clear input
+
+            // Show project-specific navigation
+            this.showProjectNavigation();
+
+            // Mark project as started
+            this.projectStarted = true;
+            localStorage.setItem('projectStarted', 'true');
+
             this.loadProjects(); // Refresh the list
         } catch (error) {
             console.error('Failed to add project:', error);
@@ -212,20 +502,98 @@ class ArchGuardianDashboard {
         }
     }
 
-    async startScan(projectId) {
-        // Show the hidden navigation links when starting a scan
-        this.showHiddenNavigation();
+    // startScan optionally accepts a button element to show inline loading
+    async startScan(projectId, buttonElement = null) {
+        // Track the active project id for view-specific loads
+        this.currentProjectId = projectId;
+
+        // Show the project-specific navigation links when starting a scan
+        this.showProjectNavigation();
 
         this.showNotification(`Starting scan for project...`, 'info');
 
-        // Trigger the scan via API
-        await fetch(`http://localhost:3000/api/v1/projects/${projectId}/scan`, { method: 'POST' });
+        // Trigger the scan via API and wait for confirmation
+        let originalBtnText = null;
+        try {
+            if (buttonElement) {
+                originalBtnText = buttonElement.textContent;
+                buttonElement.disabled = true;
+                buttonElement.textContent = 'Starting...';
+                buttonElement.classList.add('btn-loading');
+            }
 
-        // Mark project as started
-        this.projectStarted = true;
+            const resp = await fetch(`http://localhost:3000/api/v1/projects/${projectId}/scan`, { method: 'POST' });
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                const msg = err.message || `Failed to start scan (status ${resp.status})`;
+                this.showNotification(msg, 'error');
+                if (buttonElement) {
+                    buttonElement.disabled = false;
+                    buttonElement.textContent = originalBtnText || 'Start';
+                    buttonElement.classList.remove('btn-loading');
+                }
+                return; // don't proceed to issues view
+            }
 
-        // The UI will be updated via WebSocket events, but we can also force a refresh
-        setTimeout(() => this.loadProjects(), 1000);
+            // After starting, poll the project's status until it becomes 'scanning' or timeout
+            const pollInterval = 1000; // 1s
+            const timeoutMs = 15000; // 15s
+            const start = Date.now();
+            let scanningConfirmed = false;
+
+            while ((Date.now() - start) < timeoutMs) {
+                try {
+                    const sresp = await fetch(`http://localhost:3000/api/v1/projects/${projectId}`);
+                    if (sresp.ok) {
+                        const pdata = await sresp.json();
+                        if (pdata && (pdata.status === 'scanning' || pdata.status === 'active')) {
+                            scanningConfirmed = true;
+                            break;
+                        }
+                    }
+                } catch (e) {
+                    // ignore transient errors
+                }
+                await new Promise(r => setTimeout(r, pollInterval));
+            }
+
+            if (!scanningConfirmed) {
+                // still proceed but warn the user
+                this.showNotification('Scan started but the project status did not update quickly. You may need to refresh.', 'warning');
+            } else {
+                this.showNotification('Scan started and confirmed!', 'success');
+            }
+
+            // Mark project as started
+            this.projectStarted = true;
+            localStorage.setItem('projectStarted', 'true');
+
+            // Update UI highlighting for active project
+            this.updateActiveProjectUI(projectId);
+
+            // Switch to issues view to show project-specific issues
+            this.switchView('issues');
+            // Load issues for this specific project (technical-debt default)
+            this.loadIssuesData('technical-debt', projectId);
+
+            // The UI will be updated via WebSocket events, but we can also force a refresh
+            setTimeout(() => this.loadProjects(), 1000);
+        } catch (error) {
+            console.error('Failed to start scan:', error);
+            this.showNotification('Failed to start scan: ' + (error.message || error), 'error');
+            if (buttonElement) {
+                buttonElement.disabled = false;
+                buttonElement.textContent = originalBtnText || 'Start';
+                buttonElement.classList.remove('btn-loading');
+            }
+        }
+        finally {
+            if (buttonElement) {
+                buttonElement.disabled = false;
+                buttonElement.textContent = originalBtnText || 'Start';
+                buttonElement.classList.remove('btn-loading');
+            }
+        }
     }
 
     async stopScan(projectId) {
@@ -245,12 +613,12 @@ class ArchGuardianDashboard {
         setTimeout(() => this.loadProjects(), 1000);
     }
 
-    showHiddenNavigation() {
-        // Show the previously hidden navigation buttons
-        const hiddenNavButtons = document.querySelectorAll('.hidden-nav');
-        hiddenNavButtons.forEach(button => {
-            button.style.display = 'block';
-        });
+    showProjectNavigation() {
+        const projectNav = document.getElementById('project-nav');
+        if (projectNav) {
+            projectNav.style.display = 'block';
+        }
+        this.setupNavigation(); // Re-run setup to include new buttons
 
         this.showNotification('Project started! Navigation links are now available.', 'success');
     }
@@ -556,7 +924,10 @@ class ArchGuardianDashboard {
 
     async loadIssuesData(type) {
         try {
-            const response = await fetch(`http://localhost:3000/api/v1/issues?type=${type}`);
+            // Accept optional projectId as second argument
+            const projectId = arguments.length > 1 ? arguments[1] : null;
+            const projectParam = projectId ? `&project=${encodeURIComponent(projectId)}` : '';
+            const response = await fetch(`http://localhost:3000/api/v1/issues?type=${type}${projectParam}`);
             const data = await response.json();
 
             this.renderIssues(data, type);
@@ -578,11 +949,11 @@ class ArchGuardianDashboard {
             case 'security':
                 html = this.renderSecurityIssues(data.security_vulns || []);
                 break;
-            case 'obsolete':
-                html = this.renderObsoleteCode(data.obsolete_code || []);
-                break;
             case 'dependencies':
                 html = this.renderDependencyIssues(data.dangerous_dependencies || []);
+                break;
+            case 'compatibility':
+                html = this.renderCompatibilityIssues(data.compatibility_issues || []);
                 break;
         }
 
@@ -662,6 +1033,27 @@ class ArchGuardianDashboard {
         `).join('');
     }
 
+    renderCompatibilityIssues(items) {
+        if (items.length === 0) {
+            return '<div class="no-issues">🎉 No web compatibility issues found!</div>';
+        }
+
+        return items.map(item => `
+            <div class="issue-item compatibility-issue">
+                <div class="issue-header">
+                    <span class="issue-id">
+                        <span class="compat-icon">🌐</span>
+                        ${item.id}
+                    </span>
+                    <span class="issue-severity severity-${item.severity}">${item.severity}</span>
+                </div>
+                <div class="issue-description">${item.description}</div>
+                <div class="issue-location">Location: ${item.location}</div>
+                <div class="issue-remediation">💡 ${item.remediation}</div>
+            </div>
+        `).join('');
+    }
+
     updateCoverageData(data) {
         // Update coverage percentage
         const coverage = data.overall_coverage || 0;
@@ -688,21 +1080,25 @@ class ArchGuardianDashboard {
     }
 
     async loadViewData(view) {
-        // Don't load data if no project has been started
-        if (!this.projectStarted) {
+        // Don't load data if no project has been started, except for settings
+        if (!this.projectStarted && view !== 'settings') {
             console.log(`Project not started yet, skipping data load for ${view} view`);
             return;
         }
 
         switch (view) {
             case 'issues':
-                this.loadIssuesData('technical-debt');
+                // If a currentProjectId is set, load issues for it
+                this.loadIssuesData('technical-debt', this.currentProjectId || null);
                 break;
             case 'coverage':
                 this.loadCoverageData();
                 break;
             case 'graph':
                 this.loadKnowledgeGraph();
+                break;
+            case 'settings':
+                this.loadSettings();
                 break;
             // No specific data to load for 'console' view as it's real-time
         }
@@ -717,10 +1113,53 @@ class ArchGuardianDashboard {
         this.loadCoverageData();
     }
 
+    async loadSettings() {
+        try {
+            const response = await fetch('http://localhost:3000/api/v1/settings');
+            const settings = await response.json();
+
+            // Populate form fields with current settings
+            if (settings) {
+                document.getElementById('scan-interval').value = settings.scan_interval || '24';
+                document.getElementById('remediation-threshold').value = settings.remediation_threshold || '20';
+                document.getElementById('remediation-provider').value = settings.remediation_provider || 'anthropic';
+
+                // Populate API keys if they exist
+                if (settings.ai_providers) {
+                    document.getElementById('cerebras-api-key').value = settings.ai_providers.cerebras?.api_key || '';
+                    document.getElementById('gemini-api-key').value = settings.ai_providers.gemini?.api_key || '';
+                    document.getElementById('anthropic-api-key').value = settings.ai_providers.anthropic?.api_key || '';
+                    document.getElementById('openai-api-key').value = settings.ai_providers.openai?.api_key || '';
+                    document.getElementById('deepseek-api-key').value = settings.ai_providers.deepseek?.api_key || '';
+                }
+            }
+        } catch (error) {
+            console.error('Failed to load settings:', error);
+            // Set default values if loading fails
+            this.resetSettings();
+        }
+    }
+
     saveSettings() {
-        const scanInterval = document.getElementById('scan-interval').value;
-        const remediationThreshold = document.getElementById('remediation-threshold').value;
-        const remediationProvider = document.getElementById('remediation-provider').value;
+        // Get form field values safely
+        const scanIntervalElement = document.getElementById('scan-interval');
+        const remediationThresholdElement = document.getElementById('remediation-threshold');
+        const remediationProviderElement = document.getElementById('remediation-provider');
+        const cerebrasApiKeyElement = document.getElementById('cerebras-api-key');
+        const geminiApiKeyElement = document.getElementById('gemini-api-key');
+        const anthropicApiKeyElement = document.getElementById('anthropic-api-key');
+        const openaiApiKeyElement = document.getElementById('openai-api-key');
+        const deepseekApiKeyElement = document.getElementById('deepseek-api-key');
+
+        // Check if elements exist before accessing their values
+        if (!scanIntervalElement || !remediationThresholdElement || !remediationProviderElement) {
+            this.showNotification('Settings form elements not found', 'error');
+            return;
+        }
+
+        const scanInterval = scanIntervalElement.value || '24';
+        const remediationThreshold = remediationThresholdElement.value || '20';
+        const remediationProvider = remediationProviderElement.value || 'anthropic';
 
         // Send settings to server
         fetch('http://localhost:3000/api/v1/settings', {
@@ -731,7 +1170,14 @@ class ArchGuardianDashboard {
             body: JSON.stringify({
                 scan_interval: parseInt(scanInterval),
                 remediation_threshold: parseInt(remediationThreshold),
-                remediation_provider: remediationProvider
+                remediation_provider: remediationProvider,
+                ai_providers: {
+                    cerebras: { api_key: cerebrasApiKeyElement ? cerebrasApiKeyElement.value : '' },
+                    gemini: { api_key: geminiApiKeyElement ? geminiApiKeyElement.value : '' },
+                    anthropic: { api_key: anthropicApiKeyElement ? anthropicApiKeyElement.value : '' },
+                    openai: { api_key: openaiApiKeyElement ? openaiApiKeyElement.value : '' },
+                    deepseek: { api_key: deepseekApiKeyElement ? deepseekApiKeyElement.value : '' }
+                }
             })
         })
         .then(response => response.json())
@@ -748,6 +1194,11 @@ class ArchGuardianDashboard {
         document.getElementById('scan-interval').value = '24';
         document.getElementById('remediation-threshold').value = '20';
         document.getElementById('remediation-provider').value = 'anthropic';
+        document.getElementById('cerebras-api-key').value = '';
+        document.getElementById('gemini-api-key').value = '';
+        document.getElementById('anthropic-api-key').value = '';
+        document.getElementById('openai-api-key').value = '';
+        document.getElementById('deepseek-api-key').value = '';
     }
 
     setupConnectionTabs() {
@@ -768,6 +1219,25 @@ class ArchGuardianDashboard {
         });
     }
 
+    setupModalConnectionTabs() {
+        const modal = document.getElementById('projects-modal');
+        if (!modal) return;
+
+        const connectionTabs = modal.querySelectorAll('.connection-tab');
+        connectionTabs.forEach(tab => {
+            // Remove any old listeners to prevent duplicates
+            tab.replaceWith(tab.cloneNode(true));
+        });
+
+        // Add new listeners to the cloned tabs
+        modal.querySelectorAll('.connection-tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                const tabName = tab.dataset.tab;
+                this.switchConnectionTab(tabName, modal);
+            });
+        });
+    }
+
     switchConnectionTab(tab) {
         // Remove active class from all tabs and panels
         document.querySelectorAll('.connection-tab').forEach(t => t.classList.remove('active'));
@@ -776,6 +1246,19 @@ class ArchGuardianDashboard {
         // Add active class to selected tab and panel
         document.querySelector(`[data-tab="${tab}"]`).classList.add('active');
         document.getElementById(`${tab}-connection`).classList.add('active');
+    }
+
+    switchConnectionTab(tab, context = document) {
+        // Remove active class from all tabs and panels within the given context
+        context.querySelectorAll('.connection-tab').forEach(t => t.classList.remove('active'));
+        context.querySelectorAll('.connection-panel').forEach(p => p.classList.remove('active'));
+
+        // Add active class to selected tab and panel
+        const tabElement = context.querySelector(`[data-tab="${tab}"]`);
+        const panelElement = context.querySelector(`#${tab}-connection`);
+
+        if (tabElement) tabElement.classList.add('active');
+        if (panelElement) panelElement.classList.add('active');
     }
 
     async selectFolder() {
@@ -867,8 +1350,21 @@ class ArchGuardianDashboard {
             document.getElementById('local-folder-path').value = '';
             document.getElementById('project-name').value = '';
 
-            // Refresh projects list
+            // Show project-specific navigation
+            this.showProjectNavigation();
+
+            // Mark project as started
+            this.projectStarted = true;
+            localStorage.setItem('projectStarted', 'true');
+
+            // Refresh projects list and auto-select the created project if returned
+            const respData = await response.json().catch(() => null);
             this.loadProjects();
+            if (respData && respData.id) {
+                this.currentProjectId = respData.id;
+                // optionally use returned name
+                if (respData.name) this.updateActiveProjectUI(respData.id);
+            }
         } catch (error) {
             console.error('Failed to connect local project:', error);
             this.showNotification(error.message, 'error');
@@ -877,21 +1373,20 @@ class ArchGuardianDashboard {
 
     async authenticateGitHub() {
         try {
-            // Open GitHub OAuth popup or redirect
-            const authWindow = window.open(
-                'http://localhost:3000/auth/github',
-                'GitHub Authentication',
-                'width=600,height=700,scrollbars=yes,resizable=yes'
-            );
+            // The origin_host parameter tells the auth hub where to redirect back to.
+            // For a self-hosted app, this would be the instance's URL. For local dev, it's localhost.
+            const originHost = window.location.origin;
+            const response = await fetch(`/api/v1/auth/github?origin_host=${encodeURIComponent(originHost)}`);
+            
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.error?.message || 'Failed to get GitHub authentication URL.');
+            }
 
-            // Listen for authentication completion
-            const checkAuth = setInterval(() => {
-                if (authWindow.closed) {
-                    clearInterval(checkAuth);
-                    this.checkGitHubAuthStatus();
-                }
-            }, 1000);
-
+            const data = await response.json();
+            
+            // Redirect the user to the GitHub authorization URL.
+            window.location.href = data.data.auth_url;
         } catch (error) {
             console.error('GitHub authentication error:', error);
             this.showNotification('Failed to start GitHub authentication', 'error');
@@ -904,7 +1399,7 @@ class ArchGuardianDashboard {
             const authData = await response.json();
 
             if (authData.authenticated) {
-                this.githubAuthenticated = true;
+                this.githubAuthenticated = authData.data.authenticated;
                 this.updateGitHubAuthUI(true);
                 this.showNotification('GitHub authentication successful!', 'success');
             } else {
@@ -917,9 +1412,12 @@ class ArchGuardianDashboard {
     }
 
     updateGitHubAuthUI(authenticated) {
-        const authStatus = document.getElementById('github-auth-status');
-        const authBtn = document.querySelector('.auth-btn');
-        const connectBtn = document.querySelector('.github-connect-btn');
+        const modal = document.getElementById('projects-modal');
+        if (!modal) return;
+
+        const authStatus = modal.querySelector('#github-auth-status');
+        const authBtn = modal.querySelector('.auth-btn');
+        const connectBtn = modal.querySelector('.github-connect-btn');
 
         if (authenticated) {
             authStatus.innerHTML = `
@@ -939,9 +1437,12 @@ class ArchGuardianDashboard {
     }
 
     updateGitHubConnectButton() {
-        const owner = document.getElementById('github-owner').value;
-        const repo = document.getElementById('github-repo').value;
-        const connectBtn = document.querySelector('.github-connect-btn');
+        const modal = document.getElementById('projects-modal');
+        if (!modal) return;
+
+        const owner = modal.querySelector('#github-owner').value;
+        const repo = modal.querySelector('#github-repo').value;
+        const connectBtn = modal.querySelector('.github-connect-btn');
 
         connectBtn.disabled = !(owner && repo && this.githubAuthenticated);
     }
@@ -986,8 +1487,20 @@ class ArchGuardianDashboard {
             document.getElementById('github-repo').value = '';
             document.getElementById('github-branch').value = 'main';
 
-            // Refresh projects list
+            // Show project-specific navigation
+            this.showProjectNavigation();
+
+            // Mark project as started
+            this.projectStarted = true;
+            localStorage.setItem('projectStarted', 'true');
+
+            // Refresh projects list and auto-select the created project if returned
+            const respData = await response.json().catch(() => null);
             this.loadProjects();
+            if (respData && respData.id) {
+                this.currentProjectId = respData.id;
+                if (respData.name) this.updateActiveProjectUI(respData.id);
+            }
         } catch (error) {
             console.error('Failed to connect GitHub project:', error);
             this.showNotification(error.message, 'error');
@@ -1175,6 +1688,81 @@ style.textContent = `
         gap: 1.5rem;
     }
 
+    /* Modal specific layout: left column for add-project, right column for existing projects */
+    .modal-projects-grid {
+        display: grid;
+        grid-template-columns: 420px 1fr;
+        gap: 1.5rem;
+        align-items: start;
+    }
+
+    .modal-projects-list {
+        max-height: 60vh;
+        overflow: auto;
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 1rem;
+    }
+
+    .project-active {
+        border-color: var(--primary-color);
+        box-shadow: 0 4px 14px rgba(0,0,0,0.06);
+        position: relative;
+    }
+
+    .projects-spinner {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 2rem;
+        color: var(--text-secondary);
+        font-weight: 600;
+    }
+
+    .btn-loading {
+        opacity: 0.9;
+        cursor: wait !important;
+    }
+
+    /* Inline spinner inside Start button */
+    .btn-spinner {
+        display: inline-block;
+        width: 0.75rem;
+        height: 0.75rem;
+        border: 2px solid rgba(255,255,255,0.2);
+        border-top-color: white;
+        border-radius: 50%;
+        margin-right: 0.5rem;
+        vertical-align: middle;
+        visibility: hidden;
+    }
+
+    .start-scan-btn.btn-loading .btn-spinner {
+        visibility: visible;
+        animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
+    }
+
+    .project-badge {
+        font-size: 0.75rem;
+        padding: 0.25rem 0.5rem;
+        border-radius: 999px;
+        font-weight: 600;
+    }
+
+    .project-badge-active { background: var(--success-color); color: white; }
+    .project-badge-idle { background: var(--text-secondary); color: white; }
+
+    .project-ingest { margin-top: 0.75rem; color: var(--text-secondary); font-size: 0.9rem; }
+    .ingested { color: var(--success-color); font-weight: 600; }
+    .not-ingested { color: var(--warning-color); font-weight: 600; }
+    .ingest-now-btn { margin-left: 0.5rem; padding: 0.25rem 0.5rem; font-size: 0.85rem; border-radius: 0.25rem; border: none; background: var(--primary-color); color: white; cursor: pointer; }
+    .ingest-now-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
     .project-card, .add-project-card {
         background: var(--card-background);
         border: 1px solid var(--border-color);
@@ -1262,6 +1850,57 @@ style.textContent = `
         font-size: 0.875rem;
         color: var(--text-secondary);
         margin-bottom: 0.25rem;
+    }
+
+    .console-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+
+    .console-action-btn {
+        background: var(--primary-color);
+        color: white;
+        border: none;
+        padding: 0.5rem 1rem;
+        border-radius: 0.25rem;
+        cursor: pointer;
+        font-weight: 500;
+        margin-right: 0.5rem;
+    }
+    .console-action-btn:hover {
+        background: var(--primary-color-dark);
+    }
+
+    .getting-started-card {
+        background: var(--card-background);
+        border: 1px solid var(--border-color);
+        border-radius: 0.5rem;
+        padding: 1.5rem;
+        margin-bottom: 1.5rem;
+    }
+
+    .getting-started-card h3 { margin-top: 0; }
+    .getting-started-card p { color: var(--text-secondary); }
+
+    .action-btn {
+        background: var(--primary-color);
+        color: white;
+        border: none;
+        padding: 0.75rem 1.5rem;
+        border-radius: 0.25rem;
+        cursor: pointer;
+        font-weight: 500;
+        width: 100%;
+        text-align: center;
+        font-size: 1rem;
+    }
+    .action-btn:hover {
+        background: var(--primary-color-dark);
+    }
+
+    .settings-section .action-btn {
+        margin-top: 1rem;
     }
 `;
 

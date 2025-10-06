@@ -16,19 +16,25 @@
                 <h1>🛡️ ArchGuardian</h1>
             </div>
             <div class="nav-links">
-                <button class="nav-btn active" data-view="console">Console</button>
-                <button class="nav-btn" data-view="projects">Projects</button>
-                <button class="nav-btn" data-view="overview">Overview</button>
-                <button class="nav-btn" data-view="graph">Knowledge Graph</button>
-                <button class="nav-btn" data-view="issues">Issues</button>
-                <button class="nav-btn" data-view="coverage">Coverage</button>
-                <button class="nav-btn" data-view="integrations">Integrations</button>
-                <button class="nav-btn" data-view="settings">Settings</button>
+                <button class="nav-btn active" data-view="console">Console</button> <!-- Always visible -->
+                <button class="nav-btn" data-view="settings">Settings</button> <!-- Always visible -->
                 <div class="theme-toggle">
                     <button id="theme-toggle" class="theme-toggle-btn" title="Toggle theme">
                         <span class="theme-icon">🌙</span>
                     </button>
                 </div>
+            </div>
+        </nav>
+        <!-- Secondary navigation bar for project-specific views, hidden by default -->
+        <nav id="project-nav" class="project-navbar" style="display: none;">
+            <div class="nav-links">
+                <button class="nav-btn" data-view="overview">Overview</button>
+                <button class="nav-btn" data-view="graph">Knowledge Graph</button>
+                <button class="nav-btn" data-view="issues">Issues</button>
+                <button class="nav-btn" data-view="coverage">Coverage</button>
+            </div>
+            <div class="project-active-label">
+                <span id="active-project-label">No project selected</span>
             </div>
         </nav>
 
@@ -40,11 +46,19 @@
                     <div class="console-output-container">
                         <div class="console-header">
                             <h3>System Log</h3>
-                            <button class="console-clear-btn" onclick="window.dashboard.clearConsole()">Clear</button>
+                            <div>
+                                <button class="console-action-btn" onclick="window.dashboard.openProjectsModal()">Manage Projects</button>
+                                <button class="console-clear-btn" onclick="window.dashboard.clearConsole()">Clear</button>
+                            </div>
                         </div>
                         <pre id="console-output" class="console-output"></pre>
                     </div>
                     <div class="console-sidebar">
+                        <div class="getting-started-card">
+                            <h3>Getting Started</h3>
+                            <p>To begin, please configure your AI providers and orchestration preferences in the <strong>Settings</strong> panel.</p>
+                            <button class="action-btn" onclick="window.dashboard.switchView('settings')">Go to Settings</button>
+                        </div>
                         <div class="endpoints-card">
                             <h3>Available Endpoints</h3>
                             <ul class="endpoints-list">
@@ -134,6 +148,163 @@
                     <div id="projects-list" class="projects-list">
                         <!-- Project cards will be injected here by app.js -->
                     </div>
+                    <!-- The "Add Project" card is now managed entirely within the modal -->
+                </div>
+            </div>
+
+            <!-- Issues View -->
+            <div id="issues-view" class="view">
+                <div class="issues-header">
+                <h2>System Issues</h2>
+                <div class="issues-project-label">Viewing: <span id="active-issues-project">(none)</span></div>
+                    <button class="refresh-btn" onclick="refreshIssues()">Refresh</button>
+                </div>
+                <div class="issues-content">
+                    <div class="issues-tabs">
+                        <button class="tab-btn active" data-tab="technical-debt">Technical Debt</button>
+                        <button class="tab-btn" data-tab="security">Security</button>
+                        <button class="tab-btn" data-tab="dependencies">Dependencies</button>
+                    </div>
+                    <div id="issues-container" class="issues-container">
+                        <div class="loading">Loading issues...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Coverage View -->
+            <div id="coverage-view" class="view">
+                <div class="coverage-header">
+                    <h2>Test Coverage</h2>
+                    <button class="refresh-btn" onclick="refreshCoverage()">Refresh</button>
+                </div>
+                <div class="coverage-stats">
+                    <div class="coverage-card">
+                        <h3>Overall Coverage</h3>
+                        <div class="coverage-percent" id="overall-coverage">Loading...</div>
+                    </div>
+                    <div class="coverage-card">
+                        <h3>Lines Covered</h3>
+                        <div class="coverage-lines" id="lines-covered">Loading...</div>
+                    </div>
+                    <div class="coverage-card">
+                        <h3>Test Files</h3>
+                        <div class="test-files" id="test-files">Loading...</div>
+                    </div>
+                </div>
+                <div class="coverage-chart-container">
+                    <canvas id="coverage-details-chart"></canvas>
+                </div>
+            </div>
+
+            <!-- Integrations View -->
+            <div id="integrations-view" class="view">
+                <div class="integrations-header">
+                    <h2>Third-Party Integrations</h2>
+                </div>
+                <div class="integrations-grid">
+                    <div class="integration-card">
+                        <h3>🤖 AI Providers</h3>
+                        <div class="integration-status" id="ai-providers-status">
+                            <div class="status-item">Cerebras: ✅ Connected</div>
+                            <div class="status-item">Gemini: ✅ Connected</div>
+                            <div class="status-item">Anthropic: ✅ Connected</div>
+                        </div>
+                    </div>
+                    <div class="integration-card">
+                        <h3>📊 Data Engine</h3>
+                        <div class="integration-status" id="data-engine-status">
+                            <div class="status-item">ChromaDB: ✅ Connected</div>
+                            <div class="status-item">WebSocket: ✅ Running</div>
+                            <div class="status-item">REST API: ✅ Running</div>
+                        </div>
+                    </div>
+                    <div class="integration-card">
+                        <h3>🔗 External Services</h3>
+                        <div class="integration-status" id="external-services-status">
+                            <div class="status-item">Codacy: ⚠️ Not Configured</div>
+                            <div class="status-item">GitHub: ✅ Connected</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Settings View -->
+            <div id="settings-view" class="view">
+                <div class="settings-header">
+                    <h2>Configuration</h2>
+                </div>
+                <div class="settings-content">
+                    <div class="settings-section">
+                        <h3>Project Management</h3>
+                        <button class="action-btn" onclick="window.dashboard.openProjectsModal()">Manage Projects</button>
+                    </div>
+                    <div class="settings-section">
+                        <h3>Scan Settings</h3>
+                        <div class="setting-item">
+                            <label>Scan Interval (hours):</label>
+                            <input type="number" id="scan-interval" value="24">
+                        </div>
+                        <div class="setting-item">
+                            <label>Auto-remediation threshold:</label>
+                            <input type="number" id="remediation-threshold" value="20">
+                        </div>
+                    </div>
+                    <div class="settings-section">
+                        <h3>AI Providers</h3>
+                        <div class="setting-item">
+                            <label>Code Remediation Provider:</label>
+                            <select id="remediation-provider">
+                                <option value="anthropic">Anthropic (Claude)</option>
+                                <option value="openai">OpenAI (GPT-4)</option>
+                                <option value="deepseek">DeepSeek</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="settings-section">
+                        <h3>API Keys</h3>
+                        <div class="setting-item">
+                            <label for="cerebras-api-key">Cerebras API Key:</label>
+                            <input type="password" id="cerebras-api-key" placeholder="Enter Cerebras API key">
+                        </div>
+                        <div class="setting-item">
+                            <label for="gemini-api-key">Gemini API Key:</label>
+                            <input type="password" id="gemini-api-key" placeholder="Enter Gemini API key">
+                        </div>
+                        <div class="setting-item">
+                            <label for="anthropic-api-key">Anthropic API Key:</label>
+                            <input type="password" id="anthropic-api-key" placeholder="Enter Anthropic API key">
+                        </div>
+                        <div class="setting-item">
+                            <label for="openai-api-key">OpenAI API Key:</label>
+                            <input type="password" id="openai-api-key" placeholder="Enter OpenAI API key">
+                        </div>
+                        <div class="setting-item">
+                            <label for="deepseek-api-key">DeepSeek API Key:</label>
+                            <input type="password" id="deepseek-api-key" placeholder="Enter DeepSeek API key">
+                        </div>
+                    </div>
+                    <div class="settings-actions">
+                        <button class="save-btn" onclick="saveSettings()">Save Settings</button>
+                        <button class="reset-btn" onclick="resetSettings()">Reset to Defaults</button>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Projects Modal -->
+    <div id="projects-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Managed Projects</h2>
+                <button class="close-btn" onclick="window.dashboard.closeProjectsModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="projects-header">
+                    <p>Connect local folders or GitHub repositories for ArchGuardian to analyze.</p>
+                    <button class="refresh-btn" onclick="window.dashboard.loadProjects()">Refresh</button>
+                </div>
+                <div class="projects-grid modal-projects-grid">
                     <div class="add-project-card">
                         <h3>Connect New Project</h3>
                         <div class="connection-tabs">
@@ -217,120 +388,12 @@
                             </button>
                         </div>
                     </div>
-                </div>
-            </div>
-
-            <!-- Issues View -->
-            <div id="issues-view" class="view">
-                <div class="issues-header">
-                    <h2>System Issues</h2>
-                    <button class="refresh-btn" onclick="refreshIssues()">Refresh</button>
-                </div>
-                <div class="issues-content">
-                    <div class="issues-tabs">
-                        <button class="tab-btn active" data-tab="technical-debt">Technical Debt</button>
-                        <button class="tab-btn" data-tab="security">Security</button>
-                        <button class="tab-btn" data-tab="obsolete">Obsolete Code</button>
-                        <button class="tab-btn" data-tab="dependencies">Dependencies</button>
-                    </div>
-                    <div id="issues-container" class="issues-container">
-                        <div class="loading">Loading issues...</div>
+                    <div id="modal-projects-list" class="projects-list modal-projects-list">
+                        <!-- Projects will be dynamically loaded here when modal is open -->
                     </div>
                 </div>
             </div>
-
-            <!-- Coverage View -->
-            <div id="coverage-view" class="view">
-                <div class="coverage-header">
-                    <h2>Test Coverage</h2>
-                    <button class="refresh-btn" onclick="refreshCoverage()">Refresh</button>
-                </div>
-                <div class="coverage-stats">
-                    <div class="coverage-card">
-                        <h3>Overall Coverage</h3>
-                        <div class="coverage-percent" id="overall-coverage">Loading...</div>
-                    </div>
-                    <div class="coverage-card">
-                        <h3>Lines Covered</h3>
-                        <div class="coverage-lines" id="lines-covered">Loading...</div>
-                    </div>
-                    <div class="coverage-card">
-                        <h3>Test Files</h3>
-                        <div class="test-files" id="test-files">Loading...</div>
-                    </div>
-                </div>
-                <div class="coverage-chart-container">
-                    <canvas id="coverage-details-chart"></canvas>
-                </div>
-            </div>
-
-            <!-- Integrations View -->
-            <div id="integrations-view" class="view">
-                <div class="integrations-header">
-                    <h2>Third-Party Integrations</h2>
-                </div>
-                <div class="integrations-grid">
-                    <div class="integration-card">
-                        <h3>🤖 AI Providers</h3>
-                        <div class="integration-status" id="ai-providers-status">
-                            <div class="status-item">Cerebras: ✅ Connected</div>
-                            <div class="status-item">Gemini: ✅ Connected</div>
-                            <div class="status-item">Anthropic: ✅ Connected</div>
-                        </div>
-                    </div>
-                    <div class="integration-card">
-                        <h3>📊 Data Engine</h3>
-                        <div class="integration-status" id="data-engine-status">
-                            <div class="status-item">ChromaDB: ✅ Connected</div>
-                            <div class="status-item">WebSocket: ✅ Running</div>
-                            <div class="status-item">REST API: ✅ Running</div>
-                        </div>
-                    </div>
-                    <div class="integration-card">
-                        <h3>🔗 External Services</h3>
-                        <div class="integration-status" id="external-services-status">
-                            <div class="status-item">Codacy: ⚠️ Not Configured</div>
-                            <div class="status-item">GitHub: ✅ Connected</div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Settings View -->
-            <div id="settings-view" class="view">
-                <div class="settings-header">
-                    <h2>Configuration</h2>
-                </div>
-                <div class="settings-content">
-                    <div class="settings-section">
-                        <h3>Scan Settings</h3>
-                        <div class="setting-item">
-                            <label>Scan Interval (hours):</label>
-                            <input type="number" id="scan-interval" value="24">
-                        </div>
-                        <div class="setting-item">
-                            <label>Auto-remediation threshold:</label>
-                            <input type="number" id="remediation-threshold" value="20">
-                        </div>
-                    </div>
-                    <div class="settings-section">
-                        <h3>AI Providers</h3>
-                        <div class="setting-item">
-                            <label>Code Remediation Provider:</label>
-                            <select id="remediation-provider">
-                                <option value="anthropic">Anthropic (Claude)</option>
-                                <option value="openai">OpenAI (GPT-4)</option>
-                                <option value="deepseek">DeepSeek</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div class="settings-actions">
-                        <button class="save-btn" onclick="saveSettings()">Save Settings</button>
-                        <button class="reset-btn" onclick="resetSettings()">Reset to Defaults</button>
-                    </div>
-                </div>
-            </div>
-        </main>
+        </div>
     </div>
 
     <script src="app.js?v=1.0.1"></script>

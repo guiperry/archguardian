@@ -6,12 +6,16 @@ GO := go
 # Binary name for local builds
 BINARY_NAME := archguardian
 
-.PHONY: all build run test clean cross-compile
+# Node.js parameters for the website frontend
+NPM_CMD=npm
+WEBSITE_DIR=website
+
+.PHONY: all build run test clean cross-compile install-frontend build-frontend
 
 all: cross-compile
 
 # Build the application for the current OS and architecture
-build:
+build: build-frontend
 	@echo "Building ArchGuardian for local development..."
 	@$(GO) build -o $(BINARY_NAME) .
 	@echo "✅ Build complete: ./$(BINARY_NAME)"
@@ -42,3 +46,14 @@ cross-compile:
 release: cross-compile
 	@echo "Uploading release binaries..."
 	@bash scripts/release.sh
+
+
+# Install frontend dependencies
+install-frontend:
+	@echo "Installing website dependencies..."
+	@cd $(WEBSITE_DIR) && $(NPM_CMD) install
+
+# Build the website frontend
+build-frontend: install-frontend
+	@echo "Building website frontend..."
+	@cd $(WEBSITE_DIR) && $(NPM_CMD) run build

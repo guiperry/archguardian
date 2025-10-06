@@ -11,7 +11,7 @@ import (
 )
 
 func TestNewProjectStore(t *testing.T) {
-	store := NewProjectStore()
+	store := NewProjectStore(nil)
 
 	assert.NotNil(t, store)
 	assert.NotNil(t, store.projects)
@@ -19,7 +19,7 @@ func TestNewProjectStore(t *testing.T) {
 }
 
 func TestProjectStore_Create(t *testing.T) {
-	store := NewProjectStore()
+	store := NewProjectStore(nil)
 
 	project := &Project{
 		ID:         "test-project-1",
@@ -47,7 +47,7 @@ func TestProjectStore_Create(t *testing.T) {
 }
 
 func TestProjectStore_Get(t *testing.T) {
-	store := NewProjectStore()
+	store := NewProjectStore(nil)
 
 	project := &Project{
 		ID:         "test-project-1",
@@ -79,7 +79,7 @@ func TestProjectStore_Get(t *testing.T) {
 }
 
 func TestProjectStore_GetAll(t *testing.T) {
-	store := NewProjectStore()
+	store := NewProjectStore(nil)
 
 	// Test empty store
 	projects := store.GetAll()
@@ -94,6 +94,13 @@ func TestProjectStore_GetAll(t *testing.T) {
 		CreatedAt: time.Now(),
 	}
 
+	// Validate project1 fields
+	assert.Equal(t, "project-1", project1.ID)
+	assert.Equal(t, "Project 1", project1.Name)
+	assert.Equal(t, "/path/1", project1.Path)
+	assert.Equal(t, "idle", project1.Status)
+	assert.NotNil(t, project1.CreatedAt)
+
 	project2 := &Project{
 		ID:        "project-2",
 		Name:      "Project 2",
@@ -101,6 +108,13 @@ func TestProjectStore_GetAll(t *testing.T) {
 		Status:    "scanning",
 		CreatedAt: time.Now(),
 	}
+
+	// Validate project2 fields
+	assert.Equal(t, "project-2", project2.ID)
+	assert.Equal(t, "Project 2", project2.Name)
+	assert.Equal(t, "/path/2", project2.Path)
+	assert.Equal(t, "scanning", project2.Status)
+	assert.NotNil(t, project2.CreatedAt)
 
 	store.Create(project1)
 	store.Create(project2)
@@ -126,7 +140,7 @@ func TestProjectStore_GetAll(t *testing.T) {
 }
 
 func TestProjectStore_Update(t *testing.T) {
-	store := NewProjectStore()
+	store := NewProjectStore(nil)
 
 	project := &Project{
 		ID:         "test-project-1",
@@ -150,7 +164,7 @@ func TestProjectStore_Update(t *testing.T) {
 	}
 
 	success := store.Update(updatedProject)
-	assert.True(t, success)
+	assert.True(t, success == nil)
 
 	// Verify update
 	retrieved, exists := store.Get("test-project-1")
@@ -165,11 +179,11 @@ func TestProjectStore_Update(t *testing.T) {
 	}
 
 	success = store.Update(nonExistentProject)
-	assert.False(t, success)
+	assert.False(t, success == nil)
 }
 
 func TestProjectStore_Delete(t *testing.T) {
-	store := NewProjectStore()
+	store := NewProjectStore(nil)
 
 	project := &Project{
 		ID:         "test-project-1",
@@ -185,16 +199,16 @@ func TestProjectStore_Delete(t *testing.T) {
 
 	// Delete existing project
 	success := store.Delete("test-project-1")
-	assert.True(t, success)
+	assert.True(t, success == nil)
 	assert.Equal(t, 0, len(store.projects))
 
 	// Test deleting non-existent project
 	success = store.Delete("non-existent")
-	assert.False(t, success)
+	assert.False(t, success == nil)
 }
 
 func TestProjectStore_ConcurrentAccess(t *testing.T) {
-	store := NewProjectStore()
+	store := NewProjectStore(nil)
 
 	const numGoroutines = 10
 	const numOperations = 100
@@ -248,7 +262,7 @@ func TestProjectStore_ConcurrentAccess(t *testing.T) {
 }
 
 func TestProject_StatusTransitions(t *testing.T) {
-	store := NewProjectStore()
+	store := NewProjectStore(nil)
 
 	project := &Project{
 		ID:        "test-project",
@@ -266,7 +280,7 @@ func TestProject_StatusTransitions(t *testing.T) {
 	for _, status := range statusTransitions {
 		project.Status = status
 		success := store.Update(project)
-		assert.True(t, success)
+		assert.True(t, success == nil)
 
 		retrieved, exists := store.Get(project.ID)
 		assert.True(t, exists)
@@ -301,6 +315,13 @@ func TestProject_WithKnowledgeGraph(t *testing.T) {
 	assert.NotNil(t, project.Graph)
 	assert.Equal(t, 1, len(project.Graph.Nodes))
 	assert.Equal(t, "main.go", project.Graph.Nodes["node1"].Name)
+	
+	// Validate all assigned fields
+	assert.Equal(t, "project-with-graph", project.ID)
+	assert.Equal(t, "Project with Graph", project.Name)
+	assert.Equal(t, "/path/to/project", project.Path)
+	assert.Equal(t, "idle", project.Status)
+	assert.NotNil(t, project.CreatedAt)
 }
 
 func TestProject_WithConfig(t *testing.T) {
@@ -324,10 +345,17 @@ func TestProject_WithConfig(t *testing.T) {
 	assert.Equal(t, "/test/project", project.Config.ProjectPath)
 	assert.Equal(t, "test-token", project.Config.GitHubToken)
 	assert.Equal(t, time.Hour, project.Config.ScanInterval)
+	
+	// Validate all assigned fields
+	assert.Equal(t, "project-with-config", project.ID)
+	assert.Equal(t, "Project with Config", project.Name)
+	assert.Equal(t, "/path/to/project", project.Path)
+	assert.Equal(t, "idle", project.Status)
+	assert.NotNil(t, project.CreatedAt)
 }
 
 func TestProject_LastScanHandling(t *testing.T) {
-	store := NewProjectStore()
+	store := NewProjectStore(nil)
 
 	project := &Project{
 		ID:        "test-project",
@@ -355,7 +383,7 @@ func TestProject_LastScanHandling(t *testing.T) {
 }
 
 func TestProject_IssueCountTracking(t *testing.T) {
-	store := NewProjectStore()
+	store := NewProjectStore(nil)
 
 	project := &Project{
 		ID:         "test-project",
@@ -383,7 +411,7 @@ func TestProject_IssueCountTracking(t *testing.T) {
 
 // Test project store behavior with edge cases
 func TestProjectStore_EdgeCases(t *testing.T) {
-	store := NewProjectStore()
+	store := NewProjectStore(nil)
 
 	// Test creating project with same ID twice
 	project1 := &Project{
@@ -392,11 +420,21 @@ func TestProjectStore_EdgeCases(t *testing.T) {
 		CreatedAt: time.Now(),
 	}
 
+	// Validate project1 fields
+	assert.Equal(t, "duplicate-id", project1.ID)
+	assert.Equal(t, "Project 1", project1.Name)
+	assert.NotNil(t, project1.CreatedAt)
+
 	project2 := &Project{
 		ID:        "duplicate-id",
 		Name:      "Project 2",
 		CreatedAt: time.Now(),
 	}
+
+	// Validate project2 fields
+	assert.Equal(t, "duplicate-id", project2.ID)
+	assert.Equal(t, "Project 2", project2.Name)
+	assert.NotNil(t, project2.CreatedAt)
 
 	store.Create(project1)
 	store.Create(project2) // Should overwrite project1
@@ -412,6 +450,11 @@ func TestProjectStore_EdgeCases(t *testing.T) {
 		CreatedAt: time.Now(),
 	}
 
+	// Validate empty project fields
+	assert.Equal(t, "", emptyProject.ID)
+	assert.Equal(t, "Empty ID Project", emptyProject.Name)
+	assert.NotNil(t, emptyProject.CreatedAt)
+
 	store.Create(emptyProject)
 	retrieved, exists = store.Get("")
 	assert.True(t, exists)
@@ -419,7 +462,7 @@ func TestProjectStore_EdgeCases(t *testing.T) {
 }
 
 func BenchmarkProjectStore_Create(b *testing.B) {
-	store := NewProjectStore()
+	store := NewProjectStore(nil)
 
 	for i := 0; i < b.N; i++ {
 		project := &Project{
@@ -434,7 +477,7 @@ func BenchmarkProjectStore_Create(b *testing.B) {
 }
 
 func BenchmarkProjectStore_Get(b *testing.B) {
-	store := NewProjectStore()
+	store := NewProjectStore(nil)
 
 	// Pre-populate with projects
 	for i := 0; i < 1000; i++ {
@@ -453,7 +496,7 @@ func BenchmarkProjectStore_Get(b *testing.B) {
 }
 
 func BenchmarkProjectStore_GetAll(b *testing.B) {
-	store := NewProjectStore()
+	store := NewProjectStore(nil)
 
 	// Pre-populate with projects
 	for i := 0; i < 1000; i++ {
