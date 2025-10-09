@@ -160,7 +160,6 @@ func (s *InferenceService) StartWithConfig(attemptConfigs []LLMAttemptConfig, pl
 	// Now that the orchestrator exists, link it to the strategist.
 	s.contextStrategist.orchestrator = s.orchestrator
 
-
 	s.isRunning = true
 	log.Println("InferenceService: Started successfully with dynamic configuration.")
 	return nil

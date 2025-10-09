@@ -1,6 +1,5 @@
 package inference_engine
 
-
 // DatabaseAccessor defines the interface for database operations
 // that the InferenceService might need.
 type DatabaseAccessor interface {

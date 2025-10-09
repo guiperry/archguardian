@@ -107,7 +107,7 @@ func TestAuthService_CreateOrUpdateUser(t *testing.T) {
 
 	user2 := authService.CreateOrUpdateUser(githubUser)
 	assert.Equal(t, user.ID, user2.ID)
-	assert.Equal(t, originalCreatedAt, user2.CreatedAt)   // CreatedAt should not change
+	assert.Equal(t, originalCreatedAt, user2.CreatedAt) // CreatedAt should not change
 
 	// Check that LastLogin was updated (either by our manual change or by the function)
 	assert.True(t, user2.LastLogin.After(originalLastLogin) || !user2.LastLogin.Equal(originalLastLogin))

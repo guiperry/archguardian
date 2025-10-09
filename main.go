@@ -6433,10 +6433,6 @@ func sendSuccess(w http.ResponseWriter, data interface{}) {
 	json.NewEncoder(w).Encode(response)
 }
 
-
-
-
-
 // RateLimiter implements simple rate limiting
 type RateLimiter struct {
 	requests map[string][]time.Time
@@ -7351,7 +7347,6 @@ func (kgc *KnowledgeGraphConverter) CreateLegendData() []map[string]interface{} 
 
 	return legend
 }
-
 
 // ============================================================================
 // AUTHENTICATION HANDLERS

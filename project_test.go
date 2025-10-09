@@ -315,7 +315,7 @@ func TestProject_WithKnowledgeGraph(t *testing.T) {
 	assert.NotNil(t, project.Graph)
 	assert.Equal(t, 1, len(project.Graph.Nodes))
 	assert.Equal(t, "main.go", project.Graph.Nodes["node1"].Name)
-	
+
 	// Validate all assigned fields
 	assert.Equal(t, "project-with-graph", project.ID)
 	assert.Equal(t, "Project with Graph", project.Name)
@@ -345,7 +345,7 @@ func TestProject_WithConfig(t *testing.T) {
 	assert.Equal(t, "/test/project", project.Config.ProjectPath)
 	assert.Equal(t, "test-token", project.Config.GitHubToken)
 	assert.Equal(t, time.Hour, project.Config.ScanInterval)
-	
+
 	// Validate all assigned fields
 	assert.Equal(t, "project-with-config", project.ID)
 	assert.Equal(t, "Project with Config", project.Name)

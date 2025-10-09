@@ -316,9 +316,9 @@ func createExternalEmbeddings(texts []string) ([][]float64, error) {
 
 	// Parse response
 	var response struct {
-		Success   bool        `json:"success"`
+		Success    bool        `json:"success"`
 		Embeddings [][]float64 `json:"embeddings"`
-		Error     string      `json:"error,omitempty"`
+		Error      string      `json:"error,omitempty"`
 	}
 
 	if err := json.Unmarshal(body, &response); err != nil {
