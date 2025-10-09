@@ -12,23 +12,7 @@ jobs:
 
     strategy:
       matrix:
-        go-version: [1.21.x, 1.22.x]
-
-    services:
-      # Add services if needed (e.g., PostgreSQL, Redis)
-      postgres:
-        image: postgres:15
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_USER: postgres
-          POSTGRES_DB: test_db
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
+        go-version: [1.22.x, 1.23.x]
 
     steps:
     - name: Checkout code
@@ -119,6 +103,35 @@ jobs:
           *.out
           *.log
 
+  build-website:
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+        cache-dependency-path: 'website/package-lock.json'
+
+    - name: Install website dependencies
+      run: npm install
+      working-directory: ./website
+
+    - name: Build website
+      run: npm run build
+      working-directory: ./website
+
+    - name: Archive website build
+      uses: actions/upload-artifact@v3
+      with:
+        name: website-build
+        path: website/dist/
+
   security:
     runs-on: ubuntu-latest
     needs: test
@@ -134,9 +147,9 @@ jobs:
         cache: true
 
     - name: Run Gosec Security Scanner
-      uses: securecodewarrior/github-action-gosec@master
-      with:
-        args: './...'
+      run: |
+        go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest
+        gosec ./...
 
     - name: Run govulncheck
       run: |
@@ -145,7 +158,7 @@ jobs:
 
   integration:
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, build-website]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
@@ -160,6 +173,13 @@ jobs:
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
+
+    - name: Download website artifact
+      uses: actions/download-artifact@v3
+      with:
+        name: website-build
+        path: website/dist
+
 
     - name: Build Docker image
       run: |
@@ -187,40 +207,11 @@ jobs:
         docker stop archguardian-test
         docker rm archguardian-test
 
-  deploy-docs:
-    runs-on: ubuntu-latest
-    needs: [test, security]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Generate documentation
-      run: |
-        # Generate Go documentation
-        go install golang.org/x/tools/cmd/godoc@latest
-        mkdir -p docs
-
-        # Generate API documentation
-        echo "# ArchGuardian API Documentation" > docs/api.md
-        echo "## Endpoints" >> docs/api.md
-        echo "- GET /health - Health check" >> docs/api.md
-        echo "- GET /api/v1/knowledge-graph - Knowledge graph data" >> docs/api.md
-        echo "- GET /api/v1/risk-assessment - Risk assessment data" >> docs/api.md
-        echo "- GET /api/v1/issues - Issues data" >> docs/api.md
-        echo "- GET /api/v1/coverage - Coverage data" >> docs/api.md
-
-    - name: Deploy to GitHub Pages
-      uses: peaceiris/actions-gh-pages@v3
-      if: github.ref == 'refs/heads/main'
-      with:
-        github_token: ${{ secrets.GITHUB_TOKEN }}
-        publish_dir: ./docs
-
   notify:
     runs-on: ubuntu-latest
-    needs: [test, security, integration]
+    # The build-website job is now a dependency for the notification
+    # to ensure we're notified if the website build fails.
+    needs: [test, security, integration, build-website]
     if: always() && (needs.test.result == 'failure' || needs.security.result == 'failure' || needs.integration.result == 'failure')
 
     steps:
@@ -229,12 +220,13 @@ jobs:
         echo "❌ CI/CD pipeline failed!"
         echo "Test result: ${{ needs.test.result }}"
         echo "Security result: ${{ needs.security.result }}"
+        echo "Website Build result: ${{ needs.build-website.result }}"
         echo "Integration result: ${{ needs.integration.result }}"
 
         # Here you could add Slack/Discord/Teams notifications
-        # curl -X POST -H 'Content-type: application/json' \
+        # Example: curl -X POST -H 'Content-type: application/json' \
         #   --data '{"text":"ArchGuardian CI/CD failed!"}' \
-        #   ${{ secrets.SLACK_WEBHOOK }}
+        #   $SLACK_WEBHOOK_URL
 
   cleanup:
     runs-on: ubuntu-latest

@@ -126,7 +126,6 @@ type AuthService struct {
 	tokens             map[string]*GitHubAuth
 	mutex              sync.RWMutex
 	baseURL            string
-	callbackURLs       map[string]string // Support multiple callback URLs for different environments
 }
 
 func NewAuthService() *AuthService {
@@ -1315,10 +1314,8 @@ func (sm *ScanManager) UpdateJobProgress(jobID string, progress float64, metadat
 
 	if job, exists := sm.jobs[jobID]; exists {
 		job.Progress = progress
-		if metadata != nil {
-			for k, v := range metadata {
-				job.Metadata[k] = v
-			}
+		for k, v := range metadata {
+			job.Metadata[k] = v
 		}
 
 		// Update state based on progress
@@ -5300,7 +5297,7 @@ func validateCerebrasProvider(provider ProviderCredentials) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("Cerebras API returned status %d", resp.StatusCode)
+		return fmt.Errorf("cerebras API returned status %d", resp.StatusCode)
 	}
 
 	log.Println("  ✅ Cerebras API connectivity verified")
@@ -5335,7 +5332,7 @@ func validateGeminiProvider(provider ProviderCredentials) error {
 
 	// Gemini returns 400 for empty content, which is expected for validation
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusBadRequest {
-		return fmt.Errorf("Gemini API returned status %d", resp.StatusCode)
+		return fmt.Errorf("gemini API returned status %d", resp.StatusCode)
 	}
 
 	log.Println("  ✅ Gemini API connectivity verified")
@@ -5369,7 +5366,7 @@ func validateAnthropicProvider(provider ProviderCredentials) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("Anthropic API returned status %d", resp.StatusCode)
+		return fmt.Errorf("anthropic API returned status %d", resp.StatusCode)
 	}
 
 	log.Println("  ✅ Anthropic API connectivity verified")
@@ -6436,50 +6433,9 @@ func sendSuccess(w http.ResponseWriter, data interface{}) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// errorHandlingMiddleware adds error handling to HTTP requests
-func errorHandlingMiddleware(eh *ErrorHandler) mux.MiddlewareFunc {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Generate request ID for tracing
-			requestID := generateRequestID()
 
-			// Add request ID to context for downstream handlers
-			ctx := context.WithValue(r.Context(), "request_id", requestID)
-			r = r.WithContext(ctx)
 
-			// Create a response writer that captures errors
-			wrapped := &errorResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 
-			// Call next handler
-			next.ServeHTTP(wrapped, r)
-
-			// Log non-success responses
-			if wrapped.statusCode >= 400 {
-				eh.logger.Printf("HTTP %d for request %s %s (RequestID: %s)",
-					wrapped.statusCode, r.Method, r.URL.Path, requestID)
-			}
-		})
-	}
-}
-
-// errorResponseWriter wraps http.ResponseWriter to capture status codes
-type errorResponseWriter struct {
-	http.ResponseWriter
-	statusCode int
-}
-
-func (erw *errorResponseWriter) WriteHeader(code int) {
-	erw.statusCode = code
-	erw.ResponseWriter.WriteHeader(code)
-}
-
-// generateRequestID generates a unique request ID for tracing
-func generateRequestID() string {
-	return fmt.Sprintf("req_%d", time.Now().UnixNano())
-}
-
-// Global error handler instance
-var globalErrorHandler = NewErrorHandler()
 
 // RateLimiter implements simple rate limiting
 type RateLimiter struct {
@@ -7396,8 +7352,6 @@ func (kgc *KnowledgeGraphConverter) CreateLegendData() []map[string]interface{} 
 	return legend
 }
 
-// Global converter instance for API access
-var globalKnowledgeGraphConverter *KnowledgeGraphConverter
 
 // ============================================================================
 // AUTHENTICATION HANDLERS
