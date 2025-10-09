@@ -1,0 +1,192 @@
+Results:
+
+
+[/home/gperry/Documents/GitHub/archguardian/inference_engine/gemini_provider.go:407] - G115 (CWE-190): integer overflow conversion int -> int32 (Confidence: MEDIUM, Severity: HIGH)
+    406: 		if topK, ok := value.(int); ok {
+  > 407: 			topKInt32 := int32(topK)
+    408: 			p.topK = &topKInt32
+
+Autofix: 
+
+[/home/gperry/Documents/GitHub/archguardian/main.go:7603] - G114 (CWE-676): Use of net/http serve function that has no support for setting timeouts (Confidence: HIGH, Severity: MEDIUM)
+    7602: 	log.Println("📝 Log endpoints available on http://localhost:4000/api/v1/logs")
+  > 7603: 	return http.ListenAndServe(":4000", router)
+    7604: }
+
+Autofix: 
+
+[/home/gperry/Documents/GitHub/archguardian/main.go:6768] - G114 (CWE-676): Use of net/http serve function that has no support for setting timeouts (Confidence: HIGH, Severity: MEDIUM)
+    6767: 	log.Println("📝 Log ingestion available on http://localhost:3000/api/v1/logs")
+  > 6768: 	return http.ListenAndServe(":3000", router)
+    6769: }
+
+Autofix: 
+
+[/home/gperry/Documents/GitHub/archguardian/main.go:3526] - G204 (CWE-78): Subprocess launched with a potential tainted input or cmd arguments (Confidence: HIGH, Severity: MEDIUM)
+    3525: func (r *Remediator) updateNPMPackage(pkg, version string) error {
+  > 3526: 	cmd := exec.Command("npm", "install", fmt.Sprintf("%s@%s", pkg, version))
+    3527: 	cmd.Dir = r.config.ProjectPath
+
+Autofix: 
+
+[/home/gperry/Documents/GitHub/archguardian/main.go:3511] - G204 (CWE-78): Subprocess launched with a potential tainted input or cmd arguments (Confidence: HIGH, Severity: MEDIUM)
+    3510: func (r *Remediator) updateGoModule(pkg, version string) error {
+  > 3511: 	cmd := exec.Command("go", "get", fmt.Sprintf("%s@%s", pkg, version))
+    3512: 	cmd.Dir = r.config.ProjectPath
+
+Autofix: 
+
+[/home/gperry/Documents/GitHub/archguardian/main.go:5077] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    5076: func (cfm *ConfigFileManager) LoadConfigFromFile(filePath string) (*Config, error) {
+  > 5077: 	data, err := os.ReadFile(filePath)
+    5078: 	if err != nil {
+
+Autofix: 
+
+[/home/gperry/Documents/GitHub/archguardian/main.go:4974] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    4973: 
+  > 4974: 	data, err := os.ReadFile(filePath)
+    4975: 	if err != nil {
+
+Autofix: 
+
+[/home/gperry/Documents/GitHub/archguardian/main.go:4841] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    4840: func (em *EnvironmentManager) LoadEnvironmentConfig(filePath string) error {
+  > 4841: 	data, err := os.ReadFile(filePath)
+    4842: 	if err != nil {
+
+Autofix: 
+
+[/home/gperry/Documents/GitHub/archguardian/main.go:3538] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    3537: 	reqPath := filepath.Join(r.config.ProjectPath, "requirements.txt")
+  > 3538: 	content, err := os.ReadFile(reqPath)
+    3539: 	if err != nil {
+
+Autofix: 
+
+[/home/gperry/Documents/GitHub/archguardian/main.go:2494] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    2493: 	// Parse coverage report
+  > 2494: 	content, err := os.ReadFile(coverageReport)
+    2495: 	if err != nil {
+
+Autofix: 
+
+[/home/gperry/Documents/GitHub/archguardian/main.go:2415] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    2414: 	// Parse coverage report
+  > 2415: 	content, err := os.ReadFile(coverageReport)
+    2416: 	if err != nil {
+
+Autofix: 
+
+[/home/gperry/Documents/GitHub/archguardian/main.go:2302] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    2301: 	// Read and parse coverage file
+  > 2302: 	content, err := os.ReadFile(coverageFile)
+    2303: 	if err != nil {
+
+Autofix: 
+
+[/home/gperry/Documents/GitHub/archguardian/main.go:1780] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    1779: 		for _, path := range matches {
+  > 1780: 			content, err := os.ReadFile(path)
+    1781: 			if err != nil {
+
+Autofix: 
+
+[/home/gperry/Documents/GitHub/archguardian/main.go:1615] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    1614: 			// Parse file for imports/dependencies using AST parsing
+  > 1615: 			content, err := os.ReadFile(path)
+    1616: 			if err == nil {
+
+Autofix: 
+
+[/home/gperry/Documents/GitHub/archguardian/main.go:887] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    886: func (sm *SettingsManager) LoadFromFile(filePath string) error {
+  > 887: 	data, err := os.ReadFile(filePath)
+    888: 	if err != nil {
+
+Autofix: 
+
+[/home/gperry/Documents/GitHub/archguardian/main.go:8570] - G301 (CWE-276): Expect directory permissions to be 0750 or less (Confidence: HIGH, Severity: MEDIUM)
+    8569: 	backupDir := "./backups"
+  > 8570: 	if err := os.MkdirAll(backupDir, 0755); err != nil {
+    8571: 		log.Printf("⚠️  Failed to create backups directory: %v", err)
+
+Autofix: 
+
+[/home/gperry/Documents/GitHub/archguardian/main.go:4231] - G301 (CWE-276): Expect directory permissions to be 0750 or less (Confidence: HIGH, Severity: MEDIUM)
+    4230: 	outputPath := filepath.Join(ag.config.ProjectPath, ".archguardian", "risk-assessment.json")
+  > 4231: 	os.MkdirAll(filepath.Dir(outputPath), 0755)
+    4232: 
+
+Autofix: 
+
+[/home/gperry/Documents/GitHub/archguardian/main.go:4214] - G301 (CWE-276): Expect directory permissions to be 0750 or less (Confidence: HIGH, Severity: MEDIUM)
+    4213: 	outputPath := filepath.Join(ag.config.ProjectPath, ".archguardian", "knowledge-graph.json")
+  > 4214: 	os.MkdirAll(filepath.Dir(outputPath), 0755)
+    4215: 
+
+Autofix: 
+
+[/home/gperry/Documents/GitHub/archguardian/data_engine/chromemDB_manager.go:39] - G301 (CWE-276): Expect directory permissions to be 0750 or less (Confidence: HIGH, Severity: MEDIUM)
+    38: 	// Ensure the directory for ChromemDB exists before trying to open/create the DB
+  > 39: 	if errMkdir := os.MkdirAll(dbPath, 0755); errMkdir != nil {
+    40: 		// If we can't even create the directory, it's a fatal issue for this manager.
+
+Autofix: 
+
+[/home/gperry/Documents/GitHub/archguardian/main.go:5098] - G306 (CWE-276): Expect WriteFile permissions to be 0600 or less (Confidence: HIGH, Severity: MEDIUM)
+    5097: 
+  > 5098: 	if err := os.WriteFile(filePath, data, 0644); err != nil {
+    5099: 		return fmt.Errorf("failed to write config file: %w", err)
+
+Autofix: 
+
+[/home/gperry/Documents/GitHub/archguardian/main.go:4868] - G306 (CWE-276): Expect WriteFile permissions to be 0600 or less (Confidence: HIGH, Severity: MEDIUM)
+    4867: 
+  > 4868: 	if err := os.WriteFile(filePath, data, 0644); err != nil {
+    4869: 		return fmt.Errorf("failed to write environment config file: %w", err)
+
+Autofix: 
+
+[/home/gperry/Documents/GitHub/archguardian/main.go:4238] - G306 (CWE-276): Expect WriteFile permissions to be 0600 or less (Confidence: HIGH, Severity: MEDIUM)
+    4237: 
+  > 4238: 	if err := os.WriteFile(outputPath, data, 0644); err != nil {
+    4239: 		return err
+
+Autofix: 
+
+[/home/gperry/Documents/GitHub/archguardian/main.go:4221] - G306 (CWE-276): Expect WriteFile permissions to be 0600 or less (Confidence: HIGH, Severity: MEDIUM)
+    4220: 
+  > 4221: 	if err := os.WriteFile(outputPath, data, 0644); err != nil {
+    4222: 		return err
+
+Autofix: 
+
+[/home/gperry/Documents/GitHub/archguardian/main.go:3623] - G306 (CWE-276): Expect WriteFile permissions to be 0600 or less (Confidence: HIGH, Severity: MEDIUM)
+    3622: 	log.Printf("    Overwriting file %s with AI-generated content", target)
+  > 3623: 	return os.WriteFile(absPath, []byte(fix), 0644)
+    3624: }
+
+Autofix: 
+
+[/home/gperry/Documents/GitHub/archguardian/main.go:3554] - G306 (CWE-276): Expect WriteFile permissions to be 0600 or less (Confidence: HIGH, Severity: MEDIUM)
+    3553: 	if updated {
+  > 3554: 		return os.WriteFile(reqPath, []byte(strings.Join(lines, "\n")), 0644)
+    3555: 	}
+
+Autofix: 
+
+[/home/gperry/Documents/GitHub/archguardian/main.go:940] - G306 (CWE-276): Expect WriteFile permissions to be 0600 or less (Confidence: HIGH, Severity: MEDIUM)
+    939: 
+  > 940: 	if err := os.WriteFile(filePath, data, 0644); err != nil {
+    941: 		return fmt.Errorf("failed to write settings file: %w", err)
+
+Autofix: 
+
+Summary:
+  Gosec  : dev
+  Files  : 26
+  Lines  : 20045
+  Nosec  : 0
+  Issues : 26
+
