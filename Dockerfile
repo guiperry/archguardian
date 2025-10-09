@@ -14,7 +14,7 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o archguardian main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o archguardian *.go
 
 # Expose the port the app runs on
 EXPOSE 8080

@@ -36,7 +36,7 @@ func NewChromemManager(dbPath string) (*ChromemManager, error) {
 	log.Printf("ChromemDB Manager: Initializing persistent client at path: %s", dbPath)
 
 	// Ensure the directory for ChromemDB exists before trying to open/create the DB
-	if errMkdir := os.MkdirAll(dbPath, 0755); errMkdir != nil {
+	if errMkdir := os.MkdirAll(dbPath, 0700); errMkdir != nil {
 		// If we can't even create the directory, it's a fatal issue for this manager.
 		return nil, fmt.Errorf("ChromemDB Manager: failed to create directory for persistent client at %s: %w", dbPath, errMkdir)
 	}
