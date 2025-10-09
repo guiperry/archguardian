@@ -1,0 +1,67 @@
+# Git
+.git
+.gitignore
+
+# Go
+*.test
+*.out
+coverage.txt
+profile.cov
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Build artifacts
+dist/
+build/
+bin/
+
+# Node modules (for website)
+website/node_modules/
+website/dist/
+website/.next/
+
+# Documentation
+docs/
+*.md
+LICENSE
+
+# Configuration files that might contain secrets
+.env
+.env.local
+.env.production
+.env.development
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test files
+*_test.go
+testdata/
+
+# Scripts (not needed in production)
+scripts/
+
+# Website source (not needed for main application)
+website/src/
+website/public/
+website/components.json
+website/tsconfig.*
+website/vite.config.ts
+website/tailwind.config.ts
+website/postcss.config.js
+website/eslint.config.js
+website/package*.json
+website/bun.lockb
