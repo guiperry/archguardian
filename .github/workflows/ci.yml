@@ -25,17 +25,13 @@ jobs:
       id: go
       with:
         go-version: ${{ matrix.go-version }}
-        cache: true
 
     - name: Cache Go modules
       uses: actions/cache@v3
       with:
-        path: |
-          ~/go/pkg/mod
-          ~/.cache/go-build
-        key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ steps.go.outputs.go-version }}-${{ hashFiles('**/go.sum') }}
         restore-keys: |
-          ${{ runner.os }}-go-${{ matrix.go-version }}-
           ${{ runner.os }}-go-${{ steps.go.outputs.go-version }}-
 
     - name: Install system dependencies
@@ -147,12 +143,9 @@ jobs:
       id: go
       with:
         go-version: 1.22.x
-        cache: true
 
     - name: Run Gosec Security Scanner
       run: |
-        go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest
-        gosec ./...
         curl -sfL https://raw.githubusercontent.com/securego/gosec/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.20.0
         $(go env GOPATH)/bin/gosec ./...
 
