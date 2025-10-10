@@ -1,10 +1,13 @@
 # Makefile for ArchGuardian
 
 # Default Go command
-GO := go
+GO=go
 
 # Binary name for local builds
-BINARY_NAME := archguardian
+BINARY_NAME=archguardian
+
+# Main package path
+CMD_PATH=./cmd/archguardian
 
 # Node.js parameters for the website frontend
 NPM_CMD=npm
@@ -17,13 +20,13 @@ all: cross-compile
 # Build the application for the current OS and architecture
 build: build-frontend
 	@echo "Building ArchGuardian for local development..."
-	@$(GO) build -o $(BINARY_NAME) .
+	@$(GO) build -o $(BINARY_NAME) $(CMD_PATH)
 	@echo "✅ Build complete: ./$(BINARY_NAME)"
 
 # Run the application
 run:
 	@echo "Running ArchGuardian..."
-	@$(GO) run main.go
+	@$(GO) run $(CMD_PATH)
 
 # Run tests
 test:

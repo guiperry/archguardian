@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"encoding/json"
@@ -346,7 +346,7 @@ func TestSettingsManager_GetDefaultSettings(t *testing.T) {
 	db := chromem.NewDB()
 	sm := NewSettingsManager(db)
 
-	defaults := sm.getDefaultSettings()
+	defaults := sm.GetDefaultSettings()
 
 	assert.NotNil(t, defaults)
 	assert.NotEmpty(t, defaults.ProjectPath)

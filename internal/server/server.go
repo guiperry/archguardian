@@ -1,0 +1,359 @@
+package server
+
+import (
+	"context"
+	"io/fs"
+	"log"
+	"net/http"
+	"time"
+
+	"archguardian/dashboard"
+	"archguardian/internal/auth"
+	"archguardian/internal/config"
+	"archguardian/internal/guardian"
+	"archguardian/internal/project"
+	"archguardian/internal/websocket"
+
+	"github.com/gorilla/mux"
+)
+
+// Server represents the HTTP server
+type Server struct {
+	router *mux.Router
+	server *http.Server
+}
+
+// ArchGuardian represents the main application instance
+type ArchGuardian struct {
+	Config       *config.Config
+	ProjectStore *project.ProjectStore
+	AuthService  *auth.AuthService
+	WSManager    *websocket.WebSocketManager
+	Guardian     *guardian.ArchGuardian
+	FS           fs.FS // For serving embedded files
+}
+
+// NewServer creates a new HTTP server
+func NewServer() *Server {
+	router := mux.NewRouter()
+
+	// Create server with timeouts
+	server := &http.Server{
+		Addr:              ":8080", // Use port 8080 to match Dockerfile
+		Handler:           router,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	return &Server{
+		router: router,
+		server: server,
+	}
+}
+
+// Start starts the server
+func Start(ctx context.Context, guardian *ArchGuardian, authService *auth.AuthService) error {
+	server := NewServer()
+
+	// Apply global middleware
+	rateLimiter := NewRateLimiter(time.Minute, 100)
+	server.router.Use(corsMiddleware)
+	server.router.Use(securityHeadersMiddleware)
+	server.router.Use(rateLimitMiddleware(rateLimiter))
+	server.router.Use(validationMiddleware)
+
+	// Setup routes
+	setupRoutes(server.router, guardian, authService)
+
+	log.Println("🌐 Starting ArchGuardian Consolidated Server...")
+	log.Println("✅ Consolidated server started on http://localhost:8080")
+	log.Println("📊 All API endpoints available on http://localhost:8080/api/v1/")
+	log.Println("📁 Dashboard files served from embedded resources")
+	log.Println("🔗 WebSocket available on ws://localhost:8080/ws")
+
+	// Start server
+	return server.server.ListenAndServe()
+}
+
+// setupRoutes configures all the HTTP routes
+func setupRoutes(router *mux.Router, guardian *ArchGuardian, authService *auth.AuthService) {
+	// API routes should be prefixed to avoid conflicts with static files
+	api := router.PathPrefix("/api/v1").Subrouter()
+
+	// WebSocket endpoint for dashboard log streaming
+	router.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		guardian.WSManager.HandleConnection(w, r, guardian.Guardian)
+	})
+
+	// Health check
+	router.HandleFunc("/health", handleHealth).Methods("GET")
+
+	// Authentication routes
+	router.HandleFunc("/api/v1/auth/github", func(w http.ResponseWriter, r *http.Request) {
+		handleGitHubAuth(w, r, authService)
+	}).Methods("GET")
+
+	router.HandleFunc("/api/v1/auth/github/callback", func(w http.ResponseWriter, r *http.Request) {
+		handleGitHubCallback(w, r, authService)
+	}).Methods("GET")
+
+	api.HandleFunc("/auth/github/status", func(w http.ResponseWriter, r *http.Request) {
+		handleGitHubAuthStatus(w, r, authService)
+	}).Methods("GET")
+
+	api.HandleFunc("/auth/logout", func(w http.ResponseWriter, r *http.Request) {
+		handleLogout(w, r, authService)
+	}).Methods("POST")
+
+	// Project routes
+	api.HandleFunc("/projects", func(w http.ResponseWriter, r *http.Request) {
+		handleGetProjects(w, r, guardian.ProjectStore)
+	}).Methods("GET")
+
+	api.HandleFunc("/projects", func(w http.ResponseWriter, r *http.Request) {
+		handleCreateProject(w, r, guardian.ProjectStore)
+	}).Methods("POST")
+
+	api.HandleFunc("/projects/{id}", func(w http.ResponseWriter, r *http.Request) {
+		handleGetProject(w, r, guardian.ProjectStore)
+	}).Methods("GET")
+
+	api.HandleFunc("/projects/{id}", func(w http.ResponseWriter, r *http.Request) {
+		handleDeleteProject(w, r, guardian.ProjectStore)
+	}).Methods("DELETE")
+
+	// Dashboard data endpoints
+	api.HandleFunc("/knowledge-graph", authService.OptionalAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		handleEnhancedKnowledgeGraph(w, r, guardian)
+	})).Methods("GET")
+	api.HandleFunc("/risk-assessment", authService.OptionalAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		handleEnhancedRiskAssessment(w, r, guardian)
+	})).Methods("GET")
+	api.HandleFunc("/issues", authService.OptionalAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		handleEnhancedIssues(w, r, guardian)
+	})).Methods("GET")
+	api.HandleFunc("/coverage", authService.OptionalAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		handleEnhancedCoverage(w, r, guardian)
+	})).Methods("GET")
+	api.HandleFunc("/settings", authService.OptionalAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		handleEnhancedSettings(w, r, guardian)
+	})).Methods("GET", "POST")
+
+	// Scan history and search endpoints
+	api.HandleFunc("/scans/history", func(w http.ResponseWriter, r *http.Request) {
+		handleEnhancedScanHistory(w, r, guardian)
+	}).Methods("GET")
+	api.HandleFunc("/search", func(w http.ResponseWriter, r *http.Request) {
+		handleEnhancedSemanticSearch(w, r, guardian)
+	}).Methods("GET")
+
+	// System metrics endpoint
+	api.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		handleEnhancedSystemMetrics(w, r, guardian)
+	}).Methods("GET")
+
+	// API Documentation endpoint
+	api.HandleFunc("/docs", func(w http.ResponseWriter, r *http.Request) {
+		handleEnhancedAPIDocs(w, r, guardian)
+	}).Methods("GET")
+
+	// Guardian-specific endpoints
+	api.HandleFunc("/guardian/status", func(w http.ResponseWriter, r *http.Request) {
+		handleGuardianStatus(w, r, guardian)
+	}).Methods("GET")
+	api.HandleFunc("/scan/trigger", func(w http.ResponseWriter, r *http.Request) {
+		handleTriggerScan(w, r, guardian)
+	}).Methods("POST")
+
+	// Serve the embedded dashboard files as the fallback
+	router.PathPrefix("/").Handler(http.FileServer(http.FS(dashboard.Dist)))
+}
+
+// handleHealth returns health check status
+func handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"healthy","timestamp":"` + time.Now().Format(time.RFC3339) + `","version":"1.0.0"}`))
+}
+
+// handleGitHubAuth handles GitHub authentication
+func handleGitHubAuth(w http.ResponseWriter, r *http.Request, authService *auth.AuthService) {
+	w.Header().Set("Content-Type", "application/json")
+
+	switch r.Method {
+	case "GET": // Only handle GET for auth URL
+		authService.HandleGitHubAuth(w, r)
+
+	case "POST":
+		http.Error(w, "Not implemented", http.StatusNotImplemented)
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleGitHubCallback handles GitHub OAuth callback
+func handleGitHubCallback(w http.ResponseWriter, r *http.Request, authService *auth.AuthService) {
+	code := r.URL.Query().Get("code")
+	state := r.URL.Query().Get("state")
+	
+	if code == "" {
+		http.Error(w, "Missing authorization code", http.StatusBadRequest)
+		return
+	}
+	
+	if state == "" {
+		http.Error(w, "Missing state parameter", http.StatusBadRequest)
+		return
+	}
+	
+	// Exchange code for access token
+	githubAuth, err := authService.ExchangeGitHubCode(code)
+	if err != nil {
+		log.Printf("Failed to exchange GitHub code: %v", err)
+		http.Error(w, "Failed to authenticate with GitHub", http.StatusInternalServerError)
+		return
+	}
+	
+	// Get user info from GitHub
+	githubUser, err := authService.GetGitHubUser(githubAuth.AccessToken)
+	if err != nil {
+		log.Printf("Failed to get GitHub user: %v", err)
+		http.Error(w, "Failed to get user information", http.StatusInternalServerError)
+		return
+	}
+	
+	// Create or update user
+	user := authService.CreateOrUpdateUser(githubUser)
+	
+	// Store GitHub token
+	authService.StoreGitHubToken(user.ID, githubAuth)
+	
+	// Generate JWT token (store it for future use if needed)
+	_, err = authService.GenerateJWT(user)
+	if err != nil {
+		log.Printf("Failed to generate JWT: %v", err)
+		http.Error(w, "Failed to generate authentication token", http.StatusInternalServerError)
+		return
+	}
+	
+	// For now, just redirect to dashboard - session management will be handled by the auth service
+	http.Redirect(w, r, "/?auth_success=true", http.StatusTemporaryRedirect)
+}
+
+// handleGitHubAuthStatus handles GitHub authentication status check
+func handleGitHubAuthStatus(w http.ResponseWriter, r *http.Request, authService *auth.AuthService) {
+	authService.HandleGitHubAuthStatus(w, r)
+}
+
+// handleLogout handles user logout
+func handleLogout(w http.ResponseWriter, r *http.Request, authService *auth.AuthService) {
+	authService.HandleLogout(w, r)
+}
+
+// handleGetProjects returns all projects
+func handleGetProjects(w http.ResponseWriter, _ *http.Request, projectStore *project.ProjectStore) {
+	w.Header().Set("Content-Type", "application/json")
+
+	projects := projectStore.GetAll()
+	w.WriteHeader(http.StatusOK)
+
+	// Simple JSON response
+	if len(projects) == 0 {
+		w.Write([]byte(`{"projects":[],"total":0}`))
+		return
+	}
+
+	// TODO: Properly marshal projects
+	w.Write([]byte(`{"projects":[],"total":0}`))
+}
+
+// handleCreateProject creates a new project
+func handleCreateProject(w http.ResponseWriter, _ *http.Request, _ *project.ProjectStore) {
+	w.Header().Set("Content-Type", "application/json")
+	http.Error(w, "Not implemented", http.StatusNotImplemented)
+}
+
+// handleGetProject returns a specific project
+func handleGetProject(w http.ResponseWriter, _ *http.Request, _ *project.ProjectStore) {
+	w.Header().Set("Content-Type", "application/json")
+	http.Error(w, "Not implemented", http.StatusNotImplemented)
+}
+
+// handleDeleteProject deletes a project
+func handleDeleteProject(w http.ResponseWriter, _ *http.Request, _ *project.ProjectStore) {
+	w.Header().Set("Content-Type", "application/json")
+	http.Error(w, "Not implemented", http.StatusNotImplemented)
+}
+
+// handleKnowledgeGraph returns knowledge graph data
+func handleKnowledgeGraph(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// Log the request for debugging
+	log.Printf("📊 Knowledge graph request from %s", r.RemoteAddr)
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"nodes":[],"edges":[],"message":"No knowledge graph available. Run a scan first."}`))
+}
+
+// handleRiskAssessment returns risk assessment data
+func handleRiskAssessment(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"risk_score":0,"issues":[]}`))
+}
+
+// handleIssues returns security issues
+func handleIssues(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"issues":[],"total":0}`))
+}
+
+// handleCoverage returns test coverage data
+func handleCoverage(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"coverage":0,"files":[]}`))
+}
+
+// handleSettings handles settings get/update
+func handleSettings(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"settings":{}}`))
+}
+
+// handleScanHistory returns scan history
+func handleScanHistory(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"scans":[],"total":0}`))
+}
+
+// handleSemanticSearch performs semantic search
+func handleSemanticSearch(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"results":[],"total":0}`))
+}
+
+// handleSystemMetrics returns system metrics
+func handleSystemMetrics(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"cpu":0,"memory":0,"disk":0}`))
+}
+
+// handleAPIDocs returns API documentation
+func handleAPIDocs(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"version":"1.0.0","endpoints":[]}`))
+}

@@ -26,6 +26,9 @@ jobs:
       with:
         go-version: ${{ matrix.go-version }}
 
+    - name: Clean Go mod cache
+      run: rm -rf ~/go/pkg/mod
+
     - name: Cache Go modules
       uses: actions/cache@v3
       with:
@@ -84,7 +87,7 @@ jobs:
 
     - name: Build application
       run: |
-        go build -v -o archguardian .
+        go build -v -o archguardian ./cmd/archguardian
 
     - name: Test binary
       run: |
@@ -192,18 +195,45 @@ jobs:
           -p 3000:3000 \
           archguardian:latest
 
-        # Wait for application to start
-        sleep 30
+        # Wait for application to start and be ready
+        echo "Waiting for application to start..."
+        for i in {1..30}; do
+          if curl -s http://localhost:3000/health > /dev/null; then
+            echo "Application is ready!"
+            break
+          fi
+          echo "Attempt $i: Application not ready yet, waiting..."
+          sleep 3
+        done
 
-        # Test health endpoint
-        curl -f http://localhost:3000/health || exit 1
+        # Verify application is actually responding
+        echo "Testing health endpoint..."
+        if ! curl -f http://localhost:3000/health; then
+          echo "❌ Health check failed"
+          docker logs archguardian-test
+          exit 1
+        fi
 
         # Test API endpoints
-        curl -f http://localhost:3000/api/v1/knowledge-graph || exit 1
+        echo "Testing API endpoints..."
+        if ! curl -f http://localhost:3000/api/v1/knowledge-graph; then
+          echo "❌ Knowledge graph API test failed"
+          docker logs archguardian-test
+          exit 1
+        fi
+
+        # Test authentication endpoints
+        echo "Testing authentication endpoints..."
+        if ! curl -f http://localhost:3000/api/v1/auth/github/status; then
+          echo "❌ Auth status API test failed"
+          docker logs archguardian-test
+          exit 1
+        fi
 
         # Clean up
-        docker stop archguardian-test
-        docker rm archguardian-test
+        echo "Cleaning up test container..."
+        docker stop archguardian-test || true
+        docker rm archguardian-test || true
 
   notify:
     runs-on: ubuntu-latest

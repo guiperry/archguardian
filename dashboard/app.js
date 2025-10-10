@@ -89,7 +89,7 @@ class ArchGuardianDashboard {
         this.updateConnectionStatus();
 
         try {
-            this.ws = new WebSocket(`ws://localhost:3000/ws`);
+            this.ws = new WebSocket(`ws://${window.location.host}/ws`);
         } catch (error) {
             console.error('Failed to create WebSocket:', error);
             this.handleConnectionError();
@@ -380,8 +380,8 @@ class ArchGuardianDashboard {
         try {
             // show spinner in modal if present
             const modalList = document.getElementById('modal-projects-list');
-            if (modalList) modalList.innerHTML = '<div class="projects-spinner">Loading projects...</div>';
-            const response = await fetch('http://localhost:3000/api/v1/projects');
+            if (modalList) modalList.innerHTML = '<div class="projects-spinner">Loading projects...</div>'; // Use relative path for API calls
+            const response = await fetch('/api/v1/projects');
             const projects = await response.json();
             // Render projects in both the main projects view and the modal (if open)
             this.renderProjects(projects || [], '#projects-list');
@@ -526,7 +526,7 @@ class ArchGuardianDashboard {
         }
 
         try {
-            const response = await fetch('http://localhost:3000/api/v1/projects', {
+            const response = await fetch('/api/v1/projects', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ type: projectType, path: projectPath })
@@ -574,7 +574,7 @@ class ArchGuardianDashboard {
                 buttonElement.classList.add('btn-loading');
             }
 
-            const resp = await fetch(`http://localhost:3000/api/v1/projects/${projectId}/scan`, { method: 'POST' });
+            const resp = await fetch(`/api/v1/projects/${projectId}/scan`, { method: 'POST' });
             if (!resp.ok) {
                 const err = await resp.json().catch(() => ({}));
                 const msg = err.message || `Failed to start scan (status ${resp.status})`;
@@ -595,7 +595,7 @@ class ArchGuardianDashboard {
 
             while ((Date.now() - start) < timeoutMs) {
                 try {
-                    const sresp = await fetch(`http://localhost:3000/api/v1/projects/${projectId}`);
+                    const sresp = await fetch(`/api/v1/projects/${projectId}`);
                     if (sresp.ok) {
                         const pdata = await sresp.json();
                         if (pdata && (pdata.status === 'scanning' || pdata.status === 'active')) {
@@ -655,7 +655,7 @@ class ArchGuardianDashboard {
         // In a real implementation, you would call an API endpoint to stop the scan
         try {
             // Try to call a stop endpoint if it exists
-            await fetch(`http://localhost:3000/api/v1/projects/${projectId}/stop`, { method: 'POST' });
+            await fetch(`/api/v1/projects/${projectId}/stop`, { method: 'POST' });
         } catch (error) {
             // If stop endpoint doesn't exist, just show notification
             console.log('Stop endpoint not available, scan will continue');
@@ -677,7 +677,7 @@ class ArchGuardianDashboard {
 
     async loadKnowledgeGraph() {
         try {
-            const response = await fetch('http://localhost:3000/api/v1/knowledge-graph');
+            const response = await fetch('/api/v1/knowledge-graph');
             const data = await response.json();
 
             if (data.nodes && data.edges) {
@@ -690,7 +690,7 @@ class ArchGuardianDashboard {
 
     async loadRiskAssessment() {
         try {
-            const response = await fetch('http://localhost:3000/api/v1/risk-assessment');
+            const response = await fetch('/api/v1/risk-assessment');
             const data = await response.json();
 
             this.updateOverviewData(data);
@@ -701,7 +701,7 @@ class ArchGuardianDashboard {
 
     async loadCoverageData() {
         try {
-            const response = await fetch('http://localhost:3000/api/v1/coverage');
+            const response = await fetch('/api/v1/coverage');
             const data = await response.json();
 
             this.updateCoverageData(data);
@@ -978,8 +978,8 @@ class ArchGuardianDashboard {
         try {
             // Accept optional projectId as second argument
             const projectId = arguments.length > 1 ? arguments[1] : null;
-            const projectParam = projectId ? `&project=${encodeURIComponent(projectId)}` : '';
-            const response = await fetch(`http://localhost:3000/api/v1/issues?type=${type}${projectParam}`);
+            const projectParam = projectId ? `&project_id=${encodeURIComponent(projectId)}` : '';
+            const response = await fetch(`/api/v1/issues?type=${type}${projectParam}`);
             const data = await response.json();
 
             this.renderIssues(data, type);
@@ -1170,7 +1170,7 @@ class ArchGuardianDashboard {
 
     async loadAlerts() {
         try {
-            const response = await fetch('http://localhost:3000/api/v1/alerts');
+            const response = await fetch('/api/v1/alerts');
             const data = await response.json();
 
             this.renderAlerts(data.alerts || []);
@@ -1183,7 +1183,7 @@ class ArchGuardianDashboard {
 
     async clearResolvedAlerts() {
         try {
-            const response = await fetch('http://localhost:3000/api/v1/alerts/clear-resolved', {
+            const response = await fetch('/api/v1/alerts/clear-resolved', {
                 method: 'POST'
             });
 
@@ -1259,7 +1259,7 @@ class ArchGuardianDashboard {
 
     async resolveAlert(alertId) {
         try {
-            const response = await fetch(`http://localhost:3000/api/v1/alerts/${alertId}/resolve`, {
+            const response = await fetch(`/api/v1/alerts/${alertId}/resolve`, {
                 method: 'POST'
             });
 
@@ -1277,7 +1277,7 @@ class ArchGuardianDashboard {
 
     async loadSettings() {
         try {
-            const response = await fetch('http://localhost:3000/api/v1/settings');
+            const response = await fetch('/api/v1/settings');
             const settings = await response.json();
 
             // Populate form fields with current settings
@@ -1324,7 +1324,7 @@ class ArchGuardianDashboard {
         const remediationProvider = remediationProviderElement.value || 'anthropic';
 
         // Send settings to server
-        fetch('http://localhost:3000/api/v1/settings', {
+        fetch('/api/v1/settings', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -1511,7 +1511,7 @@ class ArchGuardianDashboard {
         }
 
         try {
-            const response = await fetch('http://localhost:3000/api/v1/projects', {
+            const response = await fetch('/api/v1/projects', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -1578,7 +1578,7 @@ class ArchGuardianDashboard {
 
     async checkGitHubAuthStatus() {
         try {
-            const response = await fetch('http://localhost:3000/api/v1/auth/github/status');
+            const response = await fetch('/api/v1/auth/github/status');
             const authData = await response.json();
 
             if (authData.authenticated) {
@@ -1644,7 +1644,7 @@ class ArchGuardianDashboard {
         }
 
         try {
-            const response = await fetch('http://localhost:3000/api/v1/projects', {
+            const response = await fetch('/api/v1/projects', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
