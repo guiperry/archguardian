@@ -4651,8 +4651,8 @@ func sanitizePackageName(pkg string) string {
 	sanitized := strings.Map(func(r rune) rune {
 		// Allow only safe characters: letters, numbers, hyphens, dots, forward slashes, underscores
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
-		   (r >= '0' && r <= '9') || r == '-' || r == '.' ||
-		   r == '/' || r == '_' || r == '@' {
+			(r >= '0' && r <= '9') || r == '-' || r == '.' ||
+			r == '/' || r == '_' || r == '@' {
 			return r
 		}
 		return -1 // Remove this character
@@ -6905,9 +6905,9 @@ func startConsolidatedServer(ag *ArchGuardian, logAnalyzer *LogAnalyzer) error {
 	rateLimiter := NewRateLimiter(time.Minute, 100)
 
 	var start time.Time
-    var end time.Time
-    var activeUsers int
-	
+	var end time.Time
+	var activeUsers int
+
 	// Apply global middleware
 	router.Use(corsMiddleware)
 	router.Use(securityHeadersMiddleware)
@@ -6982,7 +6982,7 @@ func startConsolidatedServer(ag *ArchGuardian, logAnalyzer *LogAnalyzer) error {
 	router.HandleFunc("/api/v1/backup", handleBackup).Methods("POST")
 	router.HandleFunc("/api/v1/backup", handleBackupList).Methods("GET")
 	router.HandleFunc("/api/v1/backup/restore", handleRestore).Methods("POST")
-	
+
 	// Log ingestion endpoints (consolidated from port 4000)
 	router.HandleFunc("/api/v1/logs", func(w http.ResponseWriter, r *http.Request) {
 		handleLogIngestion(w, r, logAnalyzer)
@@ -6992,15 +6992,15 @@ func startConsolidatedServer(ag *ArchGuardian, logAnalyzer *LogAnalyzer) error {
 	}).Methods("POST")
 	router.HandleFunc("/api/v1/logs/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(map[string]interface{}{
-		"start":        start.Format(time.RFC3339),
-		"end":          end.Format(time.RFC3339),
-		"active_users": activeUsers,
-	}); err != nil {
-		log.Printf("Failed to encode active users response: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{
+			"start":        start.Format(time.RFC3339),
+			"end":          end.Format(time.RFC3339),
+			"active_users": activeUsers,
+		}); err != nil {
+			log.Printf("Failed to encode active users response: %v", err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
 	}).Methods("GET")
 
 	// Data Engine endpoints (consolidated from port 7080)
