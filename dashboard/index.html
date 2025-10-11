@@ -75,12 +75,12 @@
                         </div>
                         <div class="endpoints-card">
                             <h3>Available Endpoints</h3>
-                            <ul class="endpoints-list">
-                                <li><span>Dashboard:</span> <a href="http://localhost:3000" target="_blank">http://localhost:3000</a></li>
-                                <li><span>Dashboard API:</span> <a href="http://localhost:3000/api/v1/" target="_blank">/api/v1/*</a></li>
-                                <li><span>Data Engine API:</span> <a href="http://localhost:3000/api/v1/data/" target="_blank">/api/v1/data/*</a></li>
-                                <li><span>WebSocket:</span> <span>ws://localhost:3000/ws</span></li>
-                                <li><span>Log Ingestion:</span> <a href="http://localhost:3000/api/v1/logs" target="_blank">/api/v1/logs</a></li>
+                            <ul class="endpoints-list" id="endpoints-list">
+                                <li><span>Dashboard:</span> <a id="dashboard-link" href="#" target="_blank">Loading...</a></li>
+                                <li><span>Dashboard API:</span> <a id="dashboard-api-link" href="#" target="_blank">/api/v1/*</a></li>
+                                <li><span>Data Engine API:</span> <a id="data-engine-link" href="#" target="_blank">/api/v1/data/*</a></li>
+                                <li><span>WebSocket:</span> <span id="websocket-link">Loading...</span></li>
+                                <li><span>Log Ingestion:</span> <a id="log-ingestion-link" href="#" target="_blank">/api/v1/logs</a></li>
                             </ul>
                         </div>
                     </div>
@@ -271,6 +271,13 @@
                     <div class="settings-section">
                         <h3>Project Management</h3>
                         <button class="action-btn" onclick="window.dashboard.openProjectsModal()">Manage Projects</button>
+                    </div>
+                    <div class="settings-section">
+                        <h3>Server Configuration</h3>
+                        <div class="setting-item">
+                            <label for="server-port">Server Port:</label>
+                            <input type="number" id="server-port" min="1024" max="65535" value="8080">
+                        </div>
                     </div>
                     <div class="settings-section">
                         <h3>Scan Settings</h3>

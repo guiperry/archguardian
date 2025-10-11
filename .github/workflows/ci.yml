@@ -25,28 +25,17 @@ jobs:
       id: go
       with:
         go-version: ${{ matrix.go-version }}
-
-    - name: Clean Go mod cache
-      run: rm -rf ~/go/pkg/mod
-
-    - name: Cache Go modules
-      uses: actions/cache@v3
-      with:
-        path: ~/go/pkg/mod
-        key: ${{ runner.os }}-go-${{ steps.go.outputs.go-version }}-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-${{ steps.go.outputs.go-version }}-
+        cache: true
 
     - name: Install system dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y build-essential git
 
-    - name: Download Go dependencies
-      run: go mod download
-
-    - name: Verify dependencies
-      run: go mod verify
+    - name: Download and Verify Dependencies
+      run: |
+        go mod download
+        go mod verify
 
     - name: Run Go vet
       run: go vet ./...
@@ -187,14 +176,18 @@ jobs:
 
         # Wait for application to start and be ready
         echo "Waiting for application to start..."
-        for i in {1..30}; do
-          if curl -s http://localhost:3000/health > /dev/null; then
+        timeout 60s bash -c ' \
+          while ! curl -s -f http://localhost:3000/health > /dev/null; do \
+            echo "Attempting to connect to http://localhost:3000/health..."; \
+            sleep 2; \
+          done'
+        if [ $? -eq 0 ]; then
             echo "Application is ready!"
-            break
-          fi
-          echo "Attempt $i: Application not ready yet, waiting..."
-          sleep 3
-        done
+        else
+            echo "❌ Application failed to start in time."
+            docker logs archguardian-test
+            exit 1
+        fi
 
         # Verify application is actually responding
         echo "Testing health endpoint..."

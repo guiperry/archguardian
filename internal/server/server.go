@@ -38,12 +38,12 @@ type ArchGuardian struct {
 }
 
 // NewServer creates a new HTTP server
-func NewServer() *Server {
+func NewServer(port int) *Server {
 	router := mux.NewRouter()
 
 	// Create server with timeouts
 	server := &http.Server{
-		Addr:              ":8080", // Use port 8080 to match Dockerfile
+		Addr:              fmt.Sprintf(":%d", port),
 		Handler:           router,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -59,7 +59,8 @@ func NewServer() *Server {
 
 // Start starts the server
 func Start(ctx context.Context, guardian *ArchGuardian, authService *auth.AuthService) error {
-	server := NewServer()
+	port := guardian.Config.ServerPort
+	server := NewServer(port)
 
 	// Apply global middleware
 	rateLimiter := NewRateLimiter(time.Minute, 100)
@@ -71,11 +72,11 @@ func Start(ctx context.Context, guardian *ArchGuardian, authService *auth.AuthSe
 	// Setup routes
 	setupRoutes(server.router, guardian, authService)
 
-	log.Println("🌐 Starting ArchGuardian Consolidated Server...")
-	log.Println("✅ Consolidated server started on http://localhost:8080")
-	log.Println("📊 All API endpoints available on http://localhost:8080/api/v1/")
-	log.Println("📁 Dashboard files served from embedded resources")
-	log.Println("🔗 WebSocket available on ws://localhost:8080/ws")
+	log.Printf("🌐 Starting ArchGuardian Consolidated Server on port %d...", port)
+	log.Printf("✅ Consolidated server started on http://localhost:%d", port)
+	log.Printf("📊 All API endpoints available on http://localhost:%d/api/v1/", port)
+	log.Printf("📁 Dashboard files served from embedded resources")
+	log.Printf("🔗 WebSocket available on ws://localhost:%d/ws", port)
 
 	// Start server
 	return server.server.ListenAndServe()
@@ -173,6 +174,17 @@ func setupRoutes(router *mux.Router, guardian *ArchGuardian, authService *auth.A
 	}).Methods("GET")
 	api.HandleFunc("/scan/trigger", func(w http.ResponseWriter, r *http.Request) {
 		handleTriggerScan(w, r, guardian)
+	}).Methods("POST")
+
+	// Alerts endpoints
+	api.HandleFunc("/alerts", func(w http.ResponseWriter, r *http.Request) {
+		handleGetAlerts(w, r, guardian)
+	}).Methods("GET")
+	api.HandleFunc("/alerts/clear-resolved", func(w http.ResponseWriter, r *http.Request) {
+		handleClearResolvedAlerts(w, r, guardian)
+	}).Methods("POST")
+	api.HandleFunc("/alerts/{id}/resolve", func(w http.ResponseWriter, r *http.Request) {
+		handleResolveAlert(w, r, guardian)
 	}).Methods("POST")
 
 	// Serve the embedded dashboard files as the fallback
@@ -494,4 +506,69 @@ func handleAPIDocs(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"version":"1.0.0","endpoints":[]}`))
+}
+
+// handleGetAlerts returns all alerts
+func handleGetAlerts(w http.ResponseWriter, _ *http.Request, _ *ArchGuardian) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	// For now, return empty alerts array with proper JSON structure
+	// In a real implementation, this would fetch from the data engine
+	response := map[string]interface{}{
+		"alerts": []interface{}{},
+	}
+	
+	jsonData, err := json.Marshal(response)
+	if err != nil {
+		http.Error(w, "Failed to marshal alerts", http.StatusInternalServerError)
+		return
+	}
+	
+	w.WriteHeader(http.StatusOK)
+	w.Write(jsonData)
+}
+
+// handleResolveAlert resolves a specific alert
+func handleResolveAlert(w http.ResponseWriter, r *http.Request, _ *ArchGuardian) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	vars := mux.Vars(r)
+	alertID := vars["id"]
+	
+	// For now, just return success
+	// In a real implementation, this would resolve the alert in the data engine
+	response := map[string]interface{}{
+		"id":       alertID,
+		"resolved": true,
+	}
+	
+	jsonData, err := json.Marshal(response)
+	if err != nil {
+		http.Error(w, "Failed to marshal response", http.StatusInternalServerError)
+		return
+	}
+	
+	w.WriteHeader(http.StatusOK)
+	w.Write(jsonData)
+}
+
+// handleClearResolvedAlerts clears all resolved alerts
+func handleClearResolvedAlerts(w http.ResponseWriter, _ *http.Request, _ *ArchGuardian) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	// For now, just return success
+	// In a real implementation, this would clear resolved alerts in the data engine
+	response := map[string]interface{}{
+		"success": true,
+		"cleared": 0,
+	}
+	
+	jsonData, err := json.Marshal(response)
+	if err != nil {
+		http.Error(w, "Failed to marshal response", http.StatusInternalServerError)
+		return
+	}
+	
+	w.WriteHeader(http.StatusOK)
+	w.Write(jsonData)
 }

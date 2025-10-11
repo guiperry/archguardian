@@ -25,6 +25,7 @@ class ArchGuardianDashboard {
         this.setupAlertsTabs();
         this.setupIssuesTabs();
         this.setupThemeToggle();
+        this.setupEndpoints();
         // Print an initialization message to the dashboard console
         try { this.appendConsoleLog('Dashboard initialized'); } catch (e) { /* silent */ }
     }
@@ -86,6 +87,47 @@ class ArchGuardianDashboard {
         this.loadViewData(view);
         if (view === 'settings') {
             this.loadSettings();
+        }
+    }
+
+    setupEndpoints() {
+        // Get current port from window location
+        const currentPort = window.location.port || '80';
+        const protocol = window.location.protocol;
+        const hostname = window.location.hostname;
+        
+        // Update endpoint links with current port
+        const dashboardLink = document.getElementById('dashboard-link');
+        const dashboardApiLink = document.getElementById('dashboard-api-link');
+        const dataEngineLink = document.getElementById('data-engine-link');
+        const websocketLink = document.getElementById('websocket-link');
+        const logIngestionLink = document.getElementById('log-ingestion-link');
+        
+        if (dashboardLink) {
+            const dashboardUrl = `${protocol}//${hostname}:${currentPort}`;
+            dashboardLink.href = dashboardUrl;
+            dashboardLink.textContent = dashboardUrl;
+        }
+        
+        if (dashboardApiLink) {
+            const apiUrl = `${protocol}//${hostname}:${currentPort}/api/v1/`;
+            dashboardApiLink.href = apiUrl;
+        }
+        
+        if (dataEngineLink) {
+            const dataUrl = `${protocol}//${hostname}:${currentPort}/api/v1/data/`;
+            dataEngineLink.href = dataUrl;
+        }
+        
+        if (websocketLink) {
+            const wsProtocol = protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${wsProtocol}//${hostname}:${currentPort}/ws`;
+            websocketLink.textContent = wsUrl;
+        }
+        
+        if (logIngestionLink) {
+            const logsUrl = `${protocol}//${hostname}:${currentPort}/api/v1/logs`;
+            logIngestionLink.href = logsUrl;
         }
     }
 
@@ -1136,6 +1178,7 @@ class ArchGuardianDashboard {
             },
             physics: {
                 stabilization: false,
+                improvedLayout: false, // Disable improved layout to prevent warnings
                 barnesHut: {
                     gravitationalConstant: -80000,
                     springConstant: 0.001,
@@ -1512,6 +1555,7 @@ class ArchGuardianDashboard {
 
             // Populate form fields with current settings
             if (settings) {
+                document.getElementById('server-port').value = settings.server_port || '8080';
                 document.getElementById('scan-interval').value = settings.scan_interval || '24';
                 document.getElementById('remediation-threshold').value = settings.remediation_threshold || '20';
                 document.getElementById('remediation-provider').value = settings.remediation_provider || 'anthropic';
@@ -1524,6 +1568,9 @@ class ArchGuardianDashboard {
                     document.getElementById('openai-api-key').value = settings.ai_providers.openai?.api_key || '';
                     document.getElementById('deepseek-api-key').value = settings.ai_providers.deepseek?.api_key || '';
                 }
+
+                // Update the endpoints list with the current port
+                this.updateEndpointsList(settings.server_port || 8080);
             }
         } catch (error) {
             console.error('Failed to load settings:', error);
@@ -1534,6 +1581,7 @@ class ArchGuardianDashboard {
 
     saveSettings() {
         // Get form field values safely
+        const serverPortElement = document.getElementById('server-port');
         const scanIntervalElement = document.getElementById('scan-interval');
         const remediationThresholdElement = document.getElementById('remediation-threshold');
         const remediationProviderElement = document.getElementById('remediation-provider');
@@ -1544,11 +1592,12 @@ class ArchGuardianDashboard {
         const deepseekApiKeyElement = document.getElementById('deepseek-api-key');
 
         // Check if elements exist before accessing their values
-        if (!scanIntervalElement || !remediationThresholdElement || !remediationProviderElement) {
+        if (!serverPortElement || !scanIntervalElement || !remediationThresholdElement || !remediationProviderElement) {
             this.showNotification('Settings form elements not found', 'error');
             return;
         }
 
+        const serverPort = serverPortElement.value || '8080';
         const scanInterval = scanIntervalElement.value || '24';
         const remediationThreshold = remediationThresholdElement.value || '20';
         const remediationProvider = remediationProviderElement.value || 'anthropic';
@@ -1560,6 +1609,7 @@ class ArchGuardianDashboard {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
+                server_port: parseInt(serverPort),
                 scan_interval: parseInt(scanInterval),
                 remediation_threshold: parseInt(remediationThreshold),
                 remediation_provider: remediationProvider,
@@ -1575,6 +1625,8 @@ class ArchGuardianDashboard {
         .then(response => response.json())
         .then(data => {
             this.showNotification('Settings saved successfully!', 'success');
+            // Update the endpoints list with the new port
+            this.updateEndpointsList(parseInt(serverPort));
         })
         .catch(error => {
             console.error('Failed to save settings:', error);
@@ -1583,6 +1635,7 @@ class ArchGuardianDashboard {
     }
 
     resetSettings() {
+        document.getElementById('server-port').value = '8080';
         document.getElementById('scan-interval').value = '24';
         document.getElementById('remediation-threshold').value = '20';
         document.getElementById('remediation-provider').value = 'anthropic';
@@ -1591,6 +1644,9 @@ class ArchGuardianDashboard {
         document.getElementById('anthropic-api-key').value = '';
         document.getElementById('openai-api-key').value = '';
         document.getElementById('deepseek-api-key').value = '';
+
+        // Update the endpoints list with the default port
+        this.updateEndpointsList(8080);
     }
 
     setupConnectionTabs() {
@@ -2022,6 +2078,22 @@ class ArchGuardianDashboard {
 
     saveThemePreference() {
         localStorage.setItem('archguardian-theme', this.currentTheme);
+    }
+
+    updateEndpointsList(port) {
+        const endpointsList = document.querySelector('.endpoints-list');
+        if (!endpointsList) return;
+
+        const host = window.location.hostname;
+        const baseUrl = `http://${host}:${port}`;
+
+        endpointsList.innerHTML = `
+            <li><span>Dashboard:</span> <a href="${baseUrl}" target="_blank">${baseUrl}</a></li>
+            <li><span>Dashboard API:</span> <a href="${baseUrl}/api/v1/" target="_blank">/api/v1/*</a></li>
+            <li><span>Data Engine API:</span> <a href="${baseUrl}/api/v1/data/" target="_blank">/api/v1/data/*</a></li>
+            <li><span>WebSocket:</span> <span>ws://${host}:${port}/ws</span></li>
+            <li><span>Log Ingestion:</span> <a href="${baseUrl}/api/v1/logs" target="_blank">/api/v1/logs</a></li>
+        `;
     }
 
     showNotification(message, type = 'info') {

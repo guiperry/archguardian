@@ -7,8 +7,11 @@ import (
 	"archguardian/internal/remediation"
 	"archguardian/internal/risk"
 	"archguardian/internal/scanner"
+	"archguardian/internal/utils"
 	"archguardian/types"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -60,6 +63,10 @@ type ArchGuardian struct {
 	connMutex       sync.Mutex      // Mutex for dashboard connections list
 	baselineStarted bool            // Whether baseline periodic updates have been started
 	baselineMutex   sync.Mutex      // Protects baselineStarted
+<<<<<<< Updated upstream
+=======
+	projectID       string          // Unique identifier for the current project
+>>>>>>> Stashed changes
 }
 
 // BaselineChecker handles web compatibility checking (placeholder for now)
@@ -229,6 +236,10 @@ func NewArchGuardian(config *config.Config, aiEngine *inference_engine.Inference
 	remediatorInstance := remediation.NewRemediator(config, diagnoser)
 	log.Println("✅ Remediator initialized successfully")
 
+	// Generate project ID from project path
+	projectID := generateProjectID(config.ProjectPath)
+	log.Printf("📋 Project ID: %s", projectID)
+
 	guardian := &ArchGuardian{
 		config:      config,
 		scanner:     scannerInstance,
@@ -237,6 +248,7 @@ func NewArchGuardian(config *config.Config, aiEngine *inference_engine.Inference
 		baseline:    NewBaselineChecker(context.Background()),
 		dataEngine:  de,
 		triggerScan: make(chan bool), // Initialize the channel
+		projectID:   projectID,
 	}
 
 	// Initialize and activate logWriter for real-time log streaming to dashboard
@@ -635,39 +647,91 @@ func createCompatIssue(location, featureType, featureName, featureDescription st
 	}
 }
 
+// generateProjectID generates a unique project ID from the project path
+func generateProjectID(projectPath string) string {
+	// Get absolute path to ensure consistency
+	absPath, err := filepath.Abs(projectPath)
+	if err != nil {
+		absPath = projectPath
+	}
+
+	// Create a hash of the absolute path
+	hash := sha256.Sum256([]byte(absPath))
+	return hex.EncodeToString(hash[:8]) // Use first 8 bytes (16 hex chars)
+}
+
+// getProjectDataDir returns the OS-specific data directory for the current project
+func (ag *ArchGuardian) getProjectDataDir() (string, error) {
+	// Get the base ArchGuardian data directory
+	baseDataPath, err := utils.GetArchGuardianDataPath()
+	if err != nil {
+		return "", fmt.Errorf("failed to get data directory: %w", err)
+	}
+
+	// Create project-specific subdirectory
+	projectDataDir := filepath.Join(baseDataPath, "projects", ag.projectID)
+
+	// Ensure directory exists
+	if err := os.MkdirAll(projectDataDir, 0700); err != nil {
+		return "", fmt.Errorf("failed to create project data directory: %w", err)
+	}
+
+	return projectDataDir, nil
+}
+
 // exportKnowledgeGraph exports the knowledge graph to a file
 func (ag *ArchGuardian) exportKnowledgeGraph() error {
-	outputPath := filepath.Join(ag.config.ProjectPath, ".archguardian", "knowledge-graph.json")
-	os.MkdirAll(filepath.Dir(outputPath), 0700)
+	// Get the project-specific data directory
+	projectDataDir, err := ag.getProjectDataDir()
+	if err != nil {
+		return fmt.Errorf("failed to get project data directory: %w", err)
+	}
+
+	// Save to OS-specific data directory
+	outputPath := filepath.Join(projectDataDir, "knowledge-graph.json")
 
 	data, err := json.MarshalIndent(ag.scanner.GetKnowledgeGraph().ToAPIFormat(), "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to marshal knowledge graph: %w", err)
 	}
 
 	if err := os.WriteFile(outputPath, data, 0600); err != nil {
-		return err
+		return fmt.Errorf("failed to write knowledge graph: %w", err)
 	}
 
 	log.Printf("📊 Knowledge graph exported to: %s", outputPath)
+
+	// TODO: Also persist to chromem database for structured querying
+	// This would involve calling dataEngine.StoreKnowledgeGraph() if available
+
 	return nil
 }
 
 // exportRiskAssessment exports the risk assessment to a file
 func (ag *ArchGuardian) exportRiskAssessment(assessment *types.RiskAssessment) error {
-	outputPath := filepath.Join(ag.config.ProjectPath, ".archguardian", "risk-assessment.json")
-	os.MkdirAll(filepath.Dir(outputPath), 0700)
+	// Get the project-specific data directory
+	projectDataDir, err := ag.getProjectDataDir()
+	if err != nil {
+		return fmt.Errorf("failed to get project data directory: %w", err)
+	}
+
+	// Save to OS-specific data directory
+	outputPath := filepath.Join(projectDataDir, "risk-assessment.json")
 
 	data, err := json.MarshalIndent(assessment, "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to marshal risk assessment: %w", err)
 	}
 
 	if err := os.WriteFile(outputPath, data, 0600); err != nil {
-		return err
+		return fmt.Errorf("failed to write risk assessment: %w", err)
 	}
 
 	log.Printf("📊 Risk assessment exported to: %s", outputPath)
+
+	// TODO: Also persist to chromem database for structured querying
+	// This would involve calling dataEngine.StoreRiskAssessment() if available
+
 	return nil
 }
 

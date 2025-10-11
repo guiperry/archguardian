@@ -5,6 +5,7 @@
   "DangerousDependencies": [],
   "CompatibilityIssues": [
     {
+<<<<<<< Updated upstream
       "ID": "COMPAT-js-window.authenticateGitHub",
       "Location": "dashboard/app.js",
       "Type": "compatibility",
@@ -169,6 +170,10 @@
     {
       "ID": "COMPAT-js-JSON.stringify",
       "Location": "dashboard/app.js",
+=======
+      "ID": "COMPAT-js-JSON.stringify",
+      "Location": "scripts/log_ingestion_client.js",
+>>>>>>> Stashed changes
       "Type": "compatibility",
       "Severity": "low",
       "Description": "Usage of non-Baseline JavaScript API: 'JSON.stringify'",
@@ -176,6 +181,7 @@
       "Effort": 0
     },
     {
+<<<<<<< Updated upstream
       "ID": "COMPAT-js-document.querySelectorAll",
       "Location": "dashboard/app.js",
       "Type": "compatibility",
@@ -470,6 +476,14 @@
       "Severity": "low",
       "Description": "Usage of non-Baseline JavaScript API: 'Notification.permission'",
       "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=Notification.permission",
+=======
+      "ID": "COMPAT-js-Array.isArray",
+      "Location": "scripts/log_ingestion_client.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'Array.isArray'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=Array.isArray",
+>>>>>>> Stashed changes
       "Effort": 0
     },
     {
@@ -509,6 +523,7 @@
       "Effort": 0
     },
     {
+<<<<<<< Updated upstream
       "ID": "COMPAT-js-JSON.stringify",
       "Location": "scripts/log_ingestion_client.js",
       "Type": "compatibility",
@@ -524,6 +539,14 @@
       "Severity": "low",
       "Description": "Usage of non-Baseline JavaScript API: 'Array.isArray'",
       "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=Array.isArray",
+=======
+      "ID": "COMPAT-js-console.error",
+      "Location": "scripts/embeddings_worker.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'console.error'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=console.error",
+>>>>>>> Stashed changes
       "Effort": 0
     },
     {
@@ -546,14 +569,502 @@
     },
     {
       "ID": "COMPAT-js-console.error",
+<<<<<<< Updated upstream
       "Location": "scripts/embeddings_worker.js",
+=======
+      "Location": "dashboard/app.js",
+>>>>>>> Stashed changes
       "Type": "compatibility",
       "Severity": "low",
       "Description": "Usage of non-Baseline JavaScript API: 'console.error'",
       "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=console.error",
       "Effort": 0
+<<<<<<< Updated upstream
     }
   ],
   "OverallScore": 30.5,
   "Timestamp": "2025-10-11T03:42:43.72393508-04:00"
+=======
+    },
+    {
+      "ID": "COMPAT-js-localStorage.getItem",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'localStorage.getItem'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=localStorage.getItem",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-location.origin",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'location.origin'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=location.origin",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-console.warn",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'console.warn'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=console.warn",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-document.body",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'document.body'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=document.body",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-Math.max",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'Math.max'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=Math.max",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-localStorage.setItem",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'localStorage.setItem'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=localStorage.setItem",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-Object.values",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'Object.values'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=Object.values",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-window.startScan",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'window.startScan'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=window.startScan",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-window.clearResolvedAlerts",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'window.clearResolvedAlerts'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=window.clearResolvedAlerts",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-Math.min",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'Math.min'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=Math.min",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-JSON.parse",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'JSON.parse'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=JSON.parse",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-localStorage.removeItem",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'localStorage.removeItem'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=localStorage.removeItem",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-Notification.permission",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'Notification.permission'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=Notification.permission",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-window.showDirectoryPicker",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'window.showDirectoryPicker'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=window.showDirectoryPicker",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-window.authenticateGitHub",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'window.authenticateGitHub'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=window.authenticateGitHub",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-window.loadKnowledgeGraph",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'window.loadKnowledgeGraph'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=window.loadKnowledgeGraph",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-document.querySelectorAll",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'document.querySelectorAll'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=document.querySelectorAll",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-document.head",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'document.head'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=document.head",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-Math.floor",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'Math.floor'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=Math.floor",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-location.href",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'location.href'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=location.href",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-Notification.requestPermission",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'Notification.requestPermission'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=Notification.requestPermission",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-window.location",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'window.location'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=window.location",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-window.resetSettings",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'window.resetSettings'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=window.resetSettings",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-window.selectFolder",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'window.selectFolder'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=window.selectFolder",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-document.getElementById",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'document.getElementById'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=document.getElementById",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-console.log",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'console.log'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=console.log",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-document.addEventListener",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'document.addEventListener'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=document.addEventListener",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-window.matchMedia",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'window.matchMedia'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=window.matchMedia",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-window.resolveAlert",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'window.resolveAlert'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=window.resolveAlert",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-window.loadAlerts",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'window.loadAlerts'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=window.loadAlerts",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-window.refreshGraph",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'window.refreshGraph'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=window.refreshGraph",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-window.stopScan",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'window.stopScan'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=window.stopScan",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-WebSocket.OPEN",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'WebSocket.OPEN'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=WebSocket.OPEN",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-window.refreshIssues",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'window.refreshIssues'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=window.refreshIssues",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-location.host",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'location.host'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=location.host",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-Object.keys",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'Object.keys'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=Object.keys",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-Date.now",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'Date.now'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=Date.now",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-document.querySelector",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'document.querySelector'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=document.querySelector",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-window.refreshCoverage",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'window.refreshCoverage'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=window.refreshCoverage",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-Math.pow",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'Math.pow'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=Math.pow",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-window.dashboard",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'window.dashboard'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=window.dashboard",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-JSON.stringify",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'JSON.stringify'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=JSON.stringify",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-WebSocket.CONNECTING",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'WebSocket.CONNECTING'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=WebSocket.CONNECTING",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-window.loadProjects",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'window.loadProjects'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=window.loadProjects",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-Object.assign",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'Object.assign'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=Object.assign",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-window.saveSettings",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'window.saveSettings'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=window.saveSettings",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-window.connectGitHubProject",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'window.connectGitHubProject'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=window.connectGitHubProject",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-location.hostname",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'location.hostname'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=location.hostname",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-window.filterNodes",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'window.filterNodes'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=window.filterNodes",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-window.connectLocalProject",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'window.connectLocalProject'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=window.connectLocalProject",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-document.createElement",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'document.createElement'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=document.createElement",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-document.documentElement",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'document.documentElement'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=document.documentElement",
+      "Effort": 0
+    },
+    {
+      "ID": "COMPAT-js-Math.round",
+      "Location": "dashboard/app.js",
+      "Type": "compatibility",
+      "Severity": "low",
+      "Description": "Usage of non-Baseline JavaScript API: 'Math.round'",
+      "Remediation": "This feature may not be supported in all browsers. Consider replacing it with a widely-supported alternative or adding fallbacks/polyfills. See MDN for details: https://developer.mozilla.org/en-US/search?q=Math.round",
+      "Effort": 0
+    }
+  ],
+  "OverallScore": 31.5,
+  "Timestamp": "2025-10-11T05:16:33.421198849-04:00"
+>>>>>>> Stashed changes
 }

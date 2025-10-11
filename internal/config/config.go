@@ -22,6 +22,7 @@ type Config struct {
 	DataEngine        DataEngineConfig   `json:"data_engine"`
 	ScanInterval      time.Duration      `json:"scan_interval"`
 	RemediationBranch string             `json:"remediation_branch"`
+	ServerPort        int                `json:"server_port"`
 }
 
 // AIProviderConfig defines the configuration for AI providers
@@ -73,6 +74,7 @@ func Load() *Config {
 		GitHubRepo:        getEnv("GITHUB_REPO", ""),
 		ScanInterval:      time.Duration(getEnvInt("SCAN_INTERVAL_HOURS", 24)) * time.Hour,
 		RemediationBranch: getEnv("REMEDIATION_BRANCH", "archguardian-fixes"),
+		ServerPort:        getEnvInt("SERVER_PORT", 8080),
 		AIProviders: AIProviderConfig{
 			Cerebras: ProviderCredentials{
 				APIKey:   getEnv("CEREBRAS_API_KEY", ""),
@@ -241,6 +243,7 @@ func getDefaultSettings() *Config {
 		ProjectPath:       ".",
 		ScanInterval:      time.Hour,
 		RemediationBranch: "archguardian-fixes",
+		ServerPort:        8080,
 		AIProviders: AIProviderConfig{
 			CodeRemediationProvider: "anthropic",
 		},
