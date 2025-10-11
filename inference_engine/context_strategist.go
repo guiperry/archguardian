@@ -132,20 +132,58 @@ func NewContextStrategist(orchestrator TaskOrchestratorInterface, strategy Chunk
 
 // DecideStrategy analyzes the prompt and determines the best strategy to use.
 func (cm *ContextStrategist) DecideStrategy(ctx context.Context, llm TextGenerator, largePrompt string, instructionPerChunk string) (string, error) {
-	// For now, we will use a simplified logic. A more advanced implementation
-	// would use an LLM call to make this decision.
-	// Let's check for keywords that suggest a multi-step plan is needed.
-	keywords := []string{"plan", "step-by-step", "implement", "refactor", "fix the following issue", "generate a patch"}
-	for _, keyword := range keywords {
-		if strings.Contains(strings.ToLower(largePrompt), keyword) {
-			log.Println("ContextStrategist: Detected keywords for orchestration. Choosing OrchestrationStrategy.")
-			return cm.executeOrchestration(ctx, largePrompt)
+	// Use an LLM to classify the intent of the prompt.
+	strategy, err := cm.classifyIntent(llm, largePrompt)
+	if err != nil {
+		log.Printf("ContextStrategist: Intent classification failed: %v. Falling back to keyword-based strategy.", err)
+		// Fallback to the old keyword-based logic if the LLM call fails.
+		keywords := []string{"plan", "step-by-step", "implement", "refactor", "fix the following issue", "generate a patch"}
+		for _, keyword := range keywords {
+			if strings.Contains(strings.ToLower(largePrompt), keyword) {
+				strategy = OrchestrationStrategy
+				break
+			}
+		}
+		if strategy == "" {
+			strategy = CompactionStrategy
 		}
 	}
 
-	// Default to Compaction
-	log.Println("ContextStrategist: Defaulting to CompactionStrategy.")
-	return cm.executeCompaction(ctx, llm, largePrompt, instructionPerChunk)
+	log.Printf("ContextStrategist: Chosen strategy is '%s'.", strategy)
+
+	switch strategy {
+	case OrchestrationStrategy:
+		return cm.executeOrchestration(ctx, largePrompt)
+	case CompactionStrategy:
+		return cm.executeCompaction(ctx, llm, largePrompt, instructionPerChunk)
+	default:
+		log.Printf("ContextStrategist: Unknown strategy '%s'. Defaulting to CompactionStrategy.", strategy)
+		return cm.executeCompaction(ctx, llm, largePrompt, instructionPerChunk)
+	}
+}
+
+// classifyIntent uses an LLM to determine the best strategy for a given prompt.
+func (cm *ContextStrategist) classifyIntent(llm TextGenerator, prompt string) (ContextStrategy, error) {
+	classificationPrompt := fmt.Sprintf(`
+Analyze the following user request and classify its intent.
+Choose one of the following two strategies:
+- "orchestration": Use for complex tasks that require planning, multi-step execution, refactoring code, implementing features, or fixing complex issues.
+- "compaction": Use for simpler tasks like summarizing, explaining, or answering questions about the provided text.
+
+User Request: "%s"
+
+Respond with ONLY the chosen strategy name (e.g., "orchestration" or "compaction").`, prompt)
+
+	response, err := llm.GenerateText(classificationPrompt)
+	if err != nil {
+		return "", fmt.Errorf("LLM call for classification failed: %w", err)
+	}
+
+	cleanedResponse := strings.TrimSpace(strings.ToLower(response))
+	if cleanedResponse == string(OrchestrationStrategy) {
+		return OrchestrationStrategy, nil
+	}
+	return CompactionStrategy, nil
 }
 
 // executeOrchestration handles the sub-agent task strategy by delegating to the TaskOrchestrator.

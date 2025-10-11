@@ -246,14 +246,13 @@ func (sm *ScanManager) UpdateJobProgress(jobID string, progress float64, message
 
 	// Broadcast progress update via WebSocket if ArchGuardian is available
 	if sm.guardian != nil {
-		sm.guardian.BroadcastToDashboard(fmt.Sprintf(`{
-			"type": "scan_progress",
-			"job_id": "%s",
-			"project_id": "%s",
-			"progress": %.1f,
-			"message": "%s",
-			"timestamp": "%s"
-		}`, jobID, job.ProjectID, progress, message, time.Now().Format(time.RFC3339)))
+		sm.guardian.BroadcastToDashboard("scan_progress", map[string]interface{}{
+			"job_id":     jobID,
+			"project_id": job.ProjectID,
+			"progress":   progress,
+			"message":    message,
+			"timestamp":  time.Now().Format(time.RFC3339),
+		})
 	}
 
 	return nil
@@ -278,12 +277,11 @@ func (sm *ScanManager) CompleteJob(jobID string, result *ScanResult) error {
 
 	// Broadcast completion via WebSocket
 	if sm.guardian != nil {
-		sm.guardian.BroadcastToDashboard(fmt.Sprintf(`{
-			"type": "scan_complete",
-			"job_id": "%s",
-			"project_id": "%s",
-			"timestamp": "%s"
-		}`, jobID, job.ProjectID, time.Now().Format(time.RFC3339)))
+		sm.guardian.BroadcastToDashboard("scan_complete", map[string]interface{}{
+			"job_id":     jobID,
+			"project_id": job.ProjectID,
+			"timestamp":  time.Now().Format(time.RFC3339),
+		})
 	}
 
 	// Release project lock
@@ -499,7 +497,11 @@ func (sw *scanWorker) processJob(job *ScanJob) {
 		sw.manager.UpdateJobProgress(job.ID, 20.0, "Running scan cycle...")
 
 		// Run the scan cycle
-		err := sw.manager.guardian.RunCycle(ctx)
+		// Add a context value to indicate this is a scan-initiated cycle
+		scanCtx := context.WithValue(ctx, "source", "scan_worker")
+
+		err := sw.manager.guardian.RunCycle(scanCtx)
+
 		if err != nil {
 			sw.manager.FailJob(job.ID, err)
 			return

@@ -57,26 +57,41 @@ func NewDelegatorService(primaryAttempts []LLMAttempt, fallbackAttempts []LLMAtt
 
 // --- Helper Functions (Moved from OptimizingProxy) ---
 
+// modelToEncoding is a map of model prefixes to their corresponding tiktoken encoding.
+// This provides a centralized and extensible way to manage tokenization rules.
+var modelToEncoding = map[string]string{
+	"gpt-4":      "cl100k_base",
+	"gpt-3.5":    "cl100k_base",
+	"cerebras":   "cl100k_base", // Cerebras models are compatible with cl100k_base
+	"gemini":     "cl100k_base", // Gemini models are compatible with cl100k_base
+	"claude":     "cl100k_base", // Anthropic's Claude models are compatible with cl100k_base
+	"deepseek":   "cl100k_base", // Deepseek models are compatible with cl100k_base
+	"mistral":    "cl100k_base", // Mistral models are compatible with cl100k_base
+	"llama":      "cl100k_base", // Llama models are compatible with cl100k_base
+	"command-r":  "cl100k_base", // Cohere's Command R models are compatible with cl100k_base
+	"openrouter": "cl100k_base", // OpenRouter uses various models, cl100k_base is a safe default
+	"groq":       "cl100k_base", // Groq uses models like Llama/Mistral, so cl100k_base is appropriate
+}
+
 // getEncodingForModel returns the appropriate tiktoken encoding for a given model
 func getEncodingForModel(model string) (*tiktoken.Tiktoken, error) {
-	switch {
-	case strings.Contains(model, "gpt-4"), strings.Contains(model, "gpt-3.5"):
-		return tiktoken.EncodingForModel(model)
-	case strings.Contains(model, "cerebras"):
-		// Cerebras uses similar tokenization to GPT-4
-		return tiktoken.EncodingForModel("gpt-4")
-	case strings.Contains(model, "gemini"):
-		// Gemini uses similar tokenization to GPT-4
-		return tiktoken.EncodingForModel("gpt-4")
-	default:
-		// Try default model encoding as a fallback before giving up
-		enc, err := tiktoken.GetEncoding("cl100k_base") // Common encoding
-		if err == nil {
-			log.Printf("Warning: Unsupported model '%s' for token estimation, using cl100k_base encoding.", model)
-			return enc, nil
-		}
-		return nil, fmt.Errorf("unsupported model and failed to get default encoding: %s", model)
+	lowerModel := strings.ToLower(model)
+
+	// Check for an exact model name match first (e.g., "gpt-4")
+	if encodingName, ok := tiktoken.MODEL_TO_ENCODING[lowerModel]; ok {
+		return tiktoken.GetEncoding(encodingName)
 	}
+
+	// Check for prefixes from our custom map
+	for prefix, encodingName := range modelToEncoding {
+		if strings.Contains(lowerModel, prefix) {
+			return tiktoken.GetEncoding(encodingName)
+		}
+	}
+
+	// Fallback for truly unknown models
+	log.Printf("Warning: Unsupported model '%s' for token estimation, using cl100k_base as a fallback.", model)
+	return tiktoken.GetEncoding("cl100k_base")
 }
 
 // estimateTokens provides accurate token estimation based on model
@@ -152,6 +167,86 @@ func (d *DelegatorService) shouldFallbackOnError(err error) bool {
 	return true
 }
 
+// executeGenerationInternal is the core generation logic without the proactive context strategist check.
+// This is intended for internal use by components like the TaskOrchestrator that are already
+// part of a higher-level strategy and need to make direct LLM calls.
+func (d *DelegatorService) executeGenerationInternal(ctx context.Context, modelName string, messages []gollm_types.MemoryMessage, instructionText string, operationName string) (string, error) {
+	if len(d.primaryAttempts) == 0 || len(d.fallbackAttempts) == 0 {
+		return "", fmt.Errorf("delegator service (%s): not properly configured", operationName)
+	}
+	if len(messages) == 0 {
+		return "", fmt.Errorf("delegator service (%s): cannot generate with empty messages", operationName)
+	}
+
+	var attemptsToTry []LLMAttempt
+	specificModelRequested := modelName != "" && modelName != "No models available" && modelName != "Service unavailable"
+
+	if specificModelRequested {
+		log.Printf("DelegatorService (%s): Specific model '%s' requested. Attempting to find and use it.", operationName, modelName)
+		found := false
+		for _, attempt := range append(d.primaryAttempts, d.fallbackAttempts...) {
+			if attempt.Config.ModelName == modelName {
+				attemptsToTry = []LLMAttempt{attempt}
+				found = true
+				break
+			}
+		}
+		if !found {
+			return "", fmt.Errorf("delegator service (%s): requested model '%s' not found in configured attempts", operationName, modelName)
+		}
+	} else {
+		// If no specific model is requested, the default behavior is to try the primary list first,
+		// and then the fallback list if the primary fails. This is handled by the main loop below.
+		// We initialize attemptsToTry here to start with the primary list.
+		attemptsToTry = d.primaryAttempts
+	}
+
+	promptString := formatMessagesToPrompt(messages)
+	var lastError error
+	currentAttemptList := attemptsToTry
+
+	for listNum := 0; listNum < 2; listNum++ { // Max 2 lists: primary then fallback
+		if specificModelRequested && listNum > 0 {
+			break
+		}
+
+		listName := "Primary/Specified"
+		if !specificModelRequested {
+			if listNum == 0 {
+				listName = "Primary"
+				currentAttemptList = d.primaryAttempts
+			} else if listNum == 1 && lastError != nil && d.shouldFallbackOnError(lastError) {
+				listName = "Fallback"
+				log.Printf("DelegatorService (%s): Primary attempts failed with fallback-allowed error: %v. Switching to fallback attempts.", operationName, lastError)
+				currentAttemptList = d.fallbackAttempts
+			} else if listNum == 1 && lastError != nil {
+				log.Printf("DelegatorService (%s): Primary attempts failed but error doesn't warrant fallback: %v", operationName, lastError)
+				break
+			}
+		}
+
+		for i, attempt := range currentAttemptList {
+			targetName := fmt.Sprintf("%s Attempt %d/%d (Model: %s)", listName, i+1, len(currentAttemptList), attempt.Config.ModelName)
+			log.Printf("DelegatorService (%s): Trying %s", operationName, targetName)
+
+			finalPromptStringForLLM := "Instructions:\n" + instructionText + "\n\n---\n\n" + promptString
+			finalPromptForLLM := llm.NewPrompt(finalPromptStringForLLM)
+			responseContent, err := attempt.Instance.Generate(ctx, finalPromptForLLM)
+
+			if err == nil {
+				log.Printf("DelegatorService (%s): Generation successful with %s.", operationName, targetName)
+				// Note: We don't add to memory here, as the caller (orchestrator) manages state.
+				return responseContent, nil
+			}
+
+			lastError = err
+			log.Printf("DelegatorService (%s): Attempt with %s failed: %v", operationName, targetName, err)
+		}
+	}
+
+	return "", fmt.Errorf("%s failed after all attempts, last error: %w", operationName, lastError)
+}
+
 // executeGenerationWithRetry attempts generation using a sequence of LLMs, handling retries and fallbacks.
 func (d *DelegatorService) executeGenerationWithRetry(ctx context.Context, modelName string, messages []gollm_types.MemoryMessage, instructionText string, operationName string) (string, error) {
 	if len(d.primaryAttempts) == 0 || len(d.fallbackAttempts) == 0 {
@@ -174,6 +269,19 @@ func (d *DelegatorService) executeGenerationWithRetry(ctx context.Context, model
 		chunkingLLM := d.primaryAttempts[0].Instance
 		chunkingModelName := d.primaryAttempts[0].Config.ModelName
 		log.Printf("DelegatorService (%s): Using LLM '%s' for context strategy execution.", operationName, chunkingModelName)
+
+		// Check context to see if this is a scan-initiated request
+		source, _ := ctx.Value("source").(string)
+		if source == "scan_worker" {
+			log.Println("DelegatorService: Scan worker source detected, forcing OrchestrationStrategy.")
+			// Directly execute orchestration, bypassing intent classification
+			chunkedResponse, chunkErr := d.contextStrategist.executeOrchestration(ctx, formatMessagesToPrompt(messages))
+			if chunkErr == nil {
+				d.memory.AddMessage(gollm_types.MemoryMessage{Role: "assistant", Content: chunkedResponse})
+				return chunkedResponse, nil
+			}
+			log.Printf("DelegatorService: Forced orchestration failed: %v. Proceeding to standard logic.", chunkErr)
+		}
 
 		fullPromptForChunking := formatMessagesToPrompt(messages)
 		chunkInstruction := instructionText                                          // Pass along the original instruction

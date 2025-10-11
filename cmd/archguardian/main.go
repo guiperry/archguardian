@@ -215,6 +215,7 @@ func initializeInferenceEngine(cfg *config.Config) (*inference_engine.InferenceS
 
 	// Configure LLM attempts based on available API keys
 	var attemptConfigs []inference_engine.LLMAttemptConfig
+	var plannerModelName string // Variable to hold the actual planner model name
 
 	// Add Cerebras as primary if configured
 	if cfg.AIProviders.Cerebras.APIKey != "" {
@@ -230,12 +231,13 @@ func initializeInferenceEngine(cfg *config.Config) (*inference_engine.InferenceS
 
 	// Add Gemini as primary if configured
 	if cfg.AIProviders.Gemini.APIKey != "" {
+		plannerModelName = cfg.AIProviders.Gemini.Model // Capture the configured model name
 		attemptConfigs = append(attemptConfigs, inference_engine.LLMAttemptConfig{
 			ProviderName: "gemini",
-			ModelName:    cfg.AIProviders.Gemini.Model,
+			ModelName:    plannerModelName,
 			APIKeyEnvVar: "GEMINI_API_KEY",
-			MaxTokens:    8000,
-			IsPrimary:    true,
+			MaxTokens:    32000,
+			IsPrimary:    false, // Powerful models like Gemini Pro are better as fallbacks or for specific tasks
 		})
 		log.Println("✅ Gemini provider configured")
 	}
@@ -280,10 +282,15 @@ func initializeInferenceEngine(cfg *config.Config) (*inference_engine.InferenceS
 		return nil, fmt.Errorf("no AI providers configured. Please set at least one API key")
 	}
 
+	// If no specific planner model was configured via Gemini, default to the one in the orchestrator config.
+	if plannerModelName == "" {
+		plannerModelName = cfg.Orchestrator.PlannerModel
+	}
+
 	// Start the inference service with configured models
 	err = aiEngine.StartWithConfig(
 		attemptConfigs,
-		cfg.Orchestrator.PlannerModel,
+		plannerModelName, // Use the dynamically captured planner model name
 		cfg.Orchestrator.ExecutorModels,
 		cfg.Orchestrator.FinalizerModel,
 		cfg.Orchestrator.VerifierModel,

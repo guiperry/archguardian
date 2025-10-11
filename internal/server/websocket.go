@@ -18,9 +18,22 @@ var (
 	}
 )
 
+// wsConnection wraps a WebSocket connection with a mutex for safe concurrent writes
+type wsConnection struct {
+	conn  *websocket.Conn
+	mutex sync.Mutex
+}
+
+// WriteMessage safely writes a message to the WebSocket connection
+func (wsc *wsConnection) WriteMessage(messageType int, data []byte) error {
+	wsc.mutex.Lock()
+	defer wsc.mutex.Unlock()
+	return wsc.conn.WriteMessage(messageType, data)
+}
+
 // WebSocketManager manages WebSocket connections for the dashboard
 type WebSocketManager struct {
-	connections []*websocket.Conn
+	connections []*wsConnection
 	mutex       sync.Mutex
 	logBuffer   [][]byte
 	bufferMutex sync.Mutex
@@ -29,7 +42,7 @@ type WebSocketManager struct {
 // NewWebSocketManager creates a new WebSocket manager
 func NewWebSocketManager() *WebSocketManager {
 	return &WebSocketManager{
-		connections: make([]*websocket.Conn, 0),
+		connections: make([]*wsConnection, 0),
 		logBuffer:   make([][]byte, 0, 100),
 	}
 }
@@ -38,7 +51,8 @@ func NewWebSocketManager() *WebSocketManager {
 func (wsm *WebSocketManager) AddConnection(conn *websocket.Conn) {
 	wsm.mutex.Lock()
 	defer wsm.mutex.Unlock()
-	wsm.connections = append(wsm.connections, conn)
+	wsConn := &wsConnection{conn: conn}
+	wsm.connections = append(wsm.connections, wsConn)
 	log.Printf("Dashboard client connected. Total clients: %d", len(wsm.connections))
 }
 
@@ -48,7 +62,21 @@ func (wsm *WebSocketManager) RemoveConnection(conn *websocket.Conn) {
 	defer wsm.mutex.Unlock()
 
 	for i, c := range wsm.connections {
-		if c == conn {
+		if c.conn == conn {
+			wsm.connections = append(wsm.connections[:i], wsm.connections[i+1:]...)
+			log.Printf("Dashboard client disconnected. Total clients: %d", len(wsm.connections))
+			break
+		}
+	}
+}
+
+// removeConnectionByWrapper removes a WebSocket connection by wrapper reference
+func (wsm *WebSocketManager) removeConnectionByWrapper(wsConn *wsConnection) {
+	wsm.mutex.Lock()
+	defer wsm.mutex.Unlock()
+
+	for i, c := range wsm.connections {
+		if c == wsConn {
 			wsm.connections = append(wsm.connections[:i], wsm.connections[i+1:]...)
 			log.Printf("Dashboard client disconnected. Total clients: %d", len(wsm.connections))
 			break
@@ -59,29 +87,36 @@ func (wsm *WebSocketManager) RemoveConnection(conn *websocket.Conn) {
 // Broadcast sends a message to all connected clients
 func (wsm *WebSocketManager) Broadcast(message string) {
 	wsm.mutex.Lock()
-	defer wsm.mutex.Unlock()
+	// Create a copy of connections to avoid holding lock during writes
+	conns := make([]*wsConnection, len(wsm.connections))
+	copy(conns, wsm.connections)
+	wsm.mutex.Unlock()
 
-	for _, conn := range wsm.connections {
+	// Write to connections without holding the list mutex
+	for _, conn := range conns {
 		if err := conn.WriteMessage(websocket.TextMessage, []byte(message)); err != nil {
 			log.Printf("Failed to send message to dashboard client: %v", err)
 			// Remove broken connection asynchronously
-			go wsm.RemoveConnection(conn)
+			go wsm.removeConnectionByWrapper(conn)
 		}
 	}
 }
 
 // FlushInitialLogs sends buffered logs to a newly connected client
-func (wsm *WebSocketManager) FlushInitialLogs(conn *websocket.Conn) {
+func (wsm *WebSocketManager) FlushInitialLogs(wsConn *wsConnection) {
 	wsm.bufferMutex.Lock()
-	defer wsm.bufferMutex.Unlock()
+	// Create a copy of the log buffer to avoid holding lock during writes
+	logsCopy := make([][]byte, len(wsm.logBuffer))
+	copy(logsCopy, wsm.logBuffer)
+	wsm.bufferMutex.Unlock()
 
-	for _, logEntry := range wsm.logBuffer {
-		if err := conn.WriteMessage(websocket.TextMessage, logEntry); err != nil {
+	for _, logEntry := range logsCopy {
+		if err := wsConn.WriteMessage(websocket.TextMessage, logEntry); err != nil {
 			log.Printf("Failed to flush initial logs: %v", err)
 			return
 		}
 	}
-	log.Printf("Flushed %d buffered log entries to new client", len(wsm.logBuffer))
+	log.Printf("Flushed %d buffered log entries to new client", len(logsCopy))
 }
 
 // BufferLog adds a log entry to the buffer
@@ -111,9 +146,25 @@ func (wsm *WebSocketManager) HandleConnection(w http.ResponseWriter, r *http.Req
 
 	log.Println("✅ Dashboard WebSocket client connected successfully")
 
-	// Register the connection
+	// Register the connection and get the wrapper
 	wsm.AddConnection(conn)
 	log.Printf("🔗 WebSocket connection registered")
+
+	// Find the wrapper for this connection
+	wsm.mutex.Lock()
+	var wsConn *wsConnection
+	for _, c := range wsm.connections {
+		if c.conn == conn {
+			wsConn = c
+			break
+		}
+	}
+	wsm.mutex.Unlock()
+
+	if wsConn == nil {
+		log.Println("⚠️  Failed to find connection wrapper")
+		return
+	}
 
 	// Handle client messages
 	for {
@@ -144,12 +195,12 @@ func (wsm *WebSocketManager) HandleConnection(w http.ResponseWriter, r *http.Req
 		case "client_ready":
 			// Client is ready to receive logs
 			log.Println("📱 Dashboard WebSocket client ready - flushing initial logs")
-			wsm.FlushInitialLogs(conn)
+			wsm.FlushInitialLogs(wsConn)
 		case "ping":
 			// Respond to ping with pong
 			pongMsg := map[string]string{"type": "pong"}
 			pongJSON, _ := json.Marshal(pongMsg)
-			if err := conn.WriteMessage(websocket.TextMessage, pongJSON); err != nil {
+			if err := wsConn.WriteMessage(websocket.TextMessage, pongJSON); err != nil {
 				log.Printf("Failed to send pong: %v", err)
 			}
 		case "subscribe_logs":

@@ -12,9 +12,22 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// wsConnection wraps a WebSocket connection with a mutex for safe concurrent writes
+type wsConnection struct {
+	conn  *websocket.Conn
+	mutex sync.Mutex
+}
+
+// WriteMessage safely writes a message to the WebSocket connection
+func (wsc *wsConnection) WriteMessage(messageType int, data []byte) error {
+	wsc.mutex.Lock()
+	defer wsc.mutex.Unlock()
+	return wsc.conn.WriteMessage(messageType, data)
+}
+
 // WebSocketManager manages WebSocket connections for real-time updates
 type WebSocketManager struct {
-	connections map[*websocket.Conn]bool
+	connections map[*websocket.Conn]*wsConnection
 	mutex       sync.RWMutex
 	upgrader    websocket.Upgrader
 }
@@ -30,7 +43,7 @@ type WSMessage struct {
 // NewWebSocketManager creates a new WebSocket manager
 func NewWebSocketManager() *WebSocketManager {
 	return &WebSocketManager{
-		connections: make(map[*websocket.Conn]bool),
+		connections: make(map[*websocket.Conn]*wsConnection),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				// Allow connections from localhost for development
@@ -58,8 +71,9 @@ func (wsm *WebSocketManager) HandleConnection(w http.ResponseWriter, r *http.Req
 	}
 
 	// Register the connection locally for broadcasting
+	wsConn := &wsConnection{conn: conn}
 	wsm.mutex.Lock()
-	wsm.connections[conn] = true
+	wsm.connections[conn] = wsConn
 	wsm.mutex.Unlock()
 
 	// Handle client messages
@@ -96,7 +110,7 @@ func (wsm *WebSocketManager) HandleConnection(w http.ResponseWriter, r *http.Req
 			}
 		case "ping":
 			// Respond to ping
-			wsm.sendMessage(conn, WSMessage{
+			wsm.sendMessage(wsConn, WSMessage{
 				Type:      "pong",
 				Timestamp: time.Now(),
 				Data:      map[string]interface{}{"status": "ok"},
@@ -126,9 +140,9 @@ func (wsm *WebSocketManager) HandleConnection(w http.ResponseWriter, r *http.Req
 // BroadcastMessage broadcasts a message to all connected clients
 func (wsm *WebSocketManager) BroadcastMessage(msgType string, data interface{}) {
 	wsm.mutex.RLock()
-	connections := make([]*websocket.Conn, 0, len(wsm.connections))
-	for conn := range wsm.connections {
-		connections = append(connections, conn)
+	connections := make([]*wsConnection, 0, len(wsm.connections))
+	for _, wsConn := range wsm.connections {
+		connections = append(connections, wsConn)
 	}
 	wsm.mutex.RUnlock()
 
@@ -138,24 +152,24 @@ func (wsm *WebSocketManager) BroadcastMessage(msgType string, data interface{}) 
 		Data:      data,
 	}
 
-	for _, conn := range connections {
-		wsm.sendMessage(conn, message)
+	for _, wsConn := range connections {
+		wsm.sendMessage(wsConn, message)
 	}
 }
 
 // sendMessage sends a message to a specific connection
-func (wsm *WebSocketManager) sendMessage(conn *websocket.Conn, message WSMessage) {
+func (wsm *WebSocketManager) sendMessage(wsConn *wsConnection, message WSMessage) {
 	data, err := json.Marshal(message)
 	if err != nil {
 		log.Printf("Failed to marshal WebSocket message: %v", err)
 		return
 	}
 
-	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+	if err := wsConn.WriteMessage(websocket.TextMessage, data); err != nil {
 		log.Printf("Failed to send WebSocket message: %v", err)
 		// Remove broken connection
 		wsm.mutex.Lock()
-		delete(wsm.connections, conn)
+		delete(wsm.connections, wsConn.conn)
 		wsm.mutex.Unlock()
 	}
 }

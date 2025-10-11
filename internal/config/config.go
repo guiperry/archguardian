@@ -105,7 +105,7 @@ func Load() *Config {
 				APIKey:   getEnv("EMBEDDING_API_KEY", ""),
 				Endpoint: getEnv("EMBEDDING_ENDPOINT", "https://embeddings.knirv.com"),
 			},
-			CodeRemediationProvider: getEnv("CODE_REMEDIATION_PROVIDER", "anthropic"),
+			CodeRemediationProvider: getEnv("CODE_REMEDIATION_PROVIDER", "deepseek"),
 		},
 		Orchestrator: OrchestratorConfig{
 			PlannerModel:   getEnv("ORCHESTRATOR_PLANNER_MODEL", "gemini-pro"),
@@ -168,11 +168,11 @@ type SettingsChangeListener interface {
 
 // SettingsManager manages application settings with validation and persistence
 type SettingsManager struct {
-	db        *chromem.DB
-	settings  *Config
+	db         *chromem.DB
+	settings   *Config
 	validators []SettingsValidator
 	listeners  []SettingsChangeListener
-	mutex     sync.RWMutex
+	mutex      sync.RWMutex
 }
 
 // DefaultSettingsValidator provides default validation for settings
@@ -245,7 +245,7 @@ func getDefaultSettings() *Config {
 		RemediationBranch: "archguardian-fixes",
 		ServerPort:        8080,
 		AIProviders: AIProviderConfig{
-			CodeRemediationProvider: "anthropic",
+			CodeRemediationProvider: "deepseek",
 		},
 		Orchestrator: OrchestratorConfig{
 			PlannerModel:   "gemini-pro",
@@ -254,12 +254,12 @@ func getDefaultSettings() *Config {
 			VerifierModel:  "gemini-pro",
 		},
 		DataEngine: DataEngineConfig{
-			Enable:         true,
-			EnableChromaDB: true,
+			Enable:          true,
+			EnableChromaDB:  true,
 			EnableWebSocket: true,
-			EnableRESTAPI:  true,
-			WebSocketPort:  8080,
-			RESTAPIPort:    7080,
+			EnableRESTAPI:   true,
+			WebSocketPort:   8080,
+			RESTAPIPort:     7080,
 		},
 	}
 }

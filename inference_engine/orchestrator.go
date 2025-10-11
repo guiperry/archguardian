@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"archguardian/inference_engine/deep_prompts"
+
+	gollm_types "github.com/guiperry/gollm_cerebras/types"
 )
 
 // SubTask defines a single task to be executed by a worker model.
@@ -116,7 +118,18 @@ Respond ONLY with a JSON object that follows this structure:
 
 	// Target a specific powerful model for planning.
 	// We pass the model name to the delegator's GenerateSimple method.
-	planJSON, err := to.delegator.GenerateSimple(ctx, to.plannerModel, planningPrompt, "")
+	// MODIFIED: Call the internal generation method to prevent recursive loop.
+	planMessages := []gollm_types.MemoryMessage{
+		{Role: "user", Content: planningPrompt},
+	}
+	// Use executeGenerationInternal to bypass the ContextStrategist check.
+	// Use a known valid model name for the v1beta endpoint.
+	plannerModelName := to.plannerModel
+	if plannerModelName == "gemini-pro" {
+		plannerModelName = "gemini-1.5-pro-latest"
+	}
+	planJSON, err := to.delegator.executeGenerationInternal(ctx, plannerModelName, planMessages, "", "Orchestrator-Plan")
+
 	if err != nil {
 		return nil, err
 	}
@@ -160,7 +173,12 @@ func (to *TaskOrchestrator) executeSubTasks(ctx context.Context, plan *TaskPlan)
 				}
 
 				// Target a fast, efficient model for execution.
-				result, err = to.delegator.GenerateSimple(ctx, executorModel, workerPrompt, "")
+				// MODIFIED: Call the internal generation method to prevent recursive loop.
+				workerMessages := []gollm_types.MemoryMessage{
+					{Role: "user", Content: workerPrompt},
+				}
+				result, err = to.delegator.executeGenerationInternal(ctx, executorModel, workerMessages, "", fmt.Sprintf("Orchestrator-Subtask-%d", t.ID))
+
 				if err == nil {
 					break // Success, exit retry loop
 				}
@@ -203,7 +221,12 @@ Synthesize these results into a complete and final answer. If the original reque
 `, originalPrompt, string(resultsJSON))
 
 	// Target a powerful model for the final synthesis/remediation.
-	finalResponse, err := to.delegator.GenerateSimple(ctx, to.finalizerModel, finalizerPrompt, "")
+	// MODIFIED: Call the internal generation method to prevent recursive loop.
+	finalizerMessages := []gollm_types.MemoryMessage{
+		{Role: "user", Content: finalizerPrompt},
+	}
+	finalResponse, err := to.delegator.executeGenerationInternal(ctx, to.finalizerModel, finalizerMessages, "", "Orchestrator-Finalize")
+
 	if err != nil {
 		return "", err
 	}
@@ -235,7 +258,12 @@ Based on your analysis, respond with a single JSON object with two keys:
 `, originalPrompt, finalResponse)
 
 	// Target a powerful model for verification.
-	verificationJSON, err := to.delegator.GenerateSimple(ctx, to.verifierModel, verifierPrompt, "")
+	// MODIFIED: Call the internal generation method to prevent recursive loop.
+	verifierMessages := []gollm_types.MemoryMessage{
+		{Role: "user", Content: verifierPrompt},
+	}
+	verificationJSON, err := to.delegator.executeGenerationInternal(ctx, to.verifierModel, verifierMessages, "", "Orchestrator-Verify")
+
 	return verificationJSON, err
 }
 
@@ -248,7 +276,12 @@ func (to *TaskOrchestrator) AnalyzeRecurringError(ctx context.Context, codeWithE
 	prompt := deep_prompts.GetEliteProblemSolverPrompt(codeWithError)
 
 	// Use the planner model (typically a powerful model like Gemini) for deep analysis
-	response, err := to.delegator.GenerateSimple(ctx, to.plannerModel, prompt, "")
+	// MODIFIED: Call the internal generation method.
+	analysisMessages := []gollm_types.MemoryMessage{
+		{Role: "user", Content: prompt},
+	}
+	response, err := to.delegator.executeGenerationInternal(ctx, to.plannerModel, analysisMessages, "", "Orchestrator-RecurringErrorAnalysis")
+
 	if err != nil {
 		return "", fmt.Errorf("recurring error analysis failed: %w", err)
 	}
@@ -266,7 +299,12 @@ func (to *TaskOrchestrator) AnalyzeSystemicErrors(ctx context.Context, knowledge
 	prompt := deep_prompts.GetSystemsArchitectThinkingPrompt(knowledgeGraph)
 
 	// Use the planner model (typically a powerful model like Gemini) for deep analysis
-	response, err := to.delegator.GenerateSimple(ctx, to.plannerModel, prompt, "")
+	// MODIFIED: Call the internal generation method.
+	analysisMessages := []gollm_types.MemoryMessage{
+		{Role: "user", Content: prompt},
+	}
+	response, err := to.delegator.executeGenerationInternal(ctx, to.plannerModel, analysisMessages, "", "Orchestrator-SystemicErrorAnalysis")
+
 	if err != nil {
 		return "", fmt.Errorf("systemic error analysis failed: %w", err)
 	}
@@ -373,7 +411,12 @@ Synthesize these results into a complete and final answer. If the original reque
 	}
 
 	// Target a powerful model for the final synthesis/remediation.
-	finalResponse, err := to.delegator.GenerateSimple(ctx, to.finalizerModel, finalizerPrompt, "")
+	// MODIFIED: Call the internal generation method.
+	finalizerMessages := []gollm_types.MemoryMessage{
+		{Role: "user", Content: finalizerPrompt},
+	}
+	finalResponse, err := to.delegator.executeGenerationInternal(ctx, to.finalizerModel, finalizerMessages, "", "Orchestrator-FinalizeWithAnalysis")
+
 	if err != nil {
 		return "", err
 	}

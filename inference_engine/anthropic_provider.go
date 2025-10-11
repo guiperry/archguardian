@@ -192,7 +192,7 @@ func (p *AnthropicProvider) SetOption(key string, value interface{}) {
 // --- Stubbed/Unsupported Methods ---
 
 func (p *AnthropicProvider) PrepareRequestWithSchema(prompt string, options map[string]interface{}, schema interface{}) ([]byte, error) {
-	return nil, errors.New("Anthropic provider does not support JSON schema validation via response_format")
+	return nil, errors.New("anthropic provider does not support JSON schema validation via response_format")
 }
 func (p *AnthropicProvider) SupportsJSONSchema() bool                        { return false }
 func (p *AnthropicProvider) HandleFunctionCalls(body []byte) ([]byte, error) { return body, nil }

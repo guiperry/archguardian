@@ -130,7 +130,7 @@ func (lw *logWriter) Write(p []byte) (n int, err error) {
 
 	// If the client is ready, broadcast immediately.
 	if lw.clientReady && lw.ag != nil {
-		lw.ag.BroadcastToDashboard(string(jsonMessage))
+		lw.ag.broadcastLogToDashboard(string(jsonMessage))
 	} else {
 		// Otherwise, buffer the initial logs.
 		if lw.maxBufferSize == 0 {
@@ -154,7 +154,7 @@ func (lw *logWriter) FlushInitialLogs() {
 	lw.clientReady = true
 	for _, logBytes := range lw.initialLogs {
 		if lw.ag != nil {
-			lw.ag.BroadcastToDashboard(string(logBytes))
+			lw.ag.broadcastLogToDashboard(string(logBytes))
 		}
 	}
 	// Clear the buffer after flushing
@@ -792,8 +792,8 @@ func (ag *ArchGuardian) removeDashboardConnectionByWrapper(wsConn *wsConnection)
 	}
 }
 
-// BroadcastToDashboard broadcasts a message to all connected dashboard clients
-func (ag *ArchGuardian) BroadcastToDashboard(message string) {
+// broadcastLogToDashboard broadcasts a raw string message to all connected dashboard clients.
+func (ag *ArchGuardian) broadcastLogToDashboard(message string) {
 	ag.connMutex.Lock()
 	// Create a copy of connections to avoid holding lock during writes
 	conns := make([]*wsConnection, len(ag.dashboardConns))
@@ -803,6 +803,31 @@ func (ag *ArchGuardian) BroadcastToDashboard(message string) {
 	// Write to connections without holding the list mutex
 	for _, conn := range conns {
 		if err := conn.WriteMessage(websocket.TextMessage, []byte(message)); err != nil {
+			log.Printf("Failed to send message to dashboard client: %v", err)
+			// Remove broken connection
+			go ag.removeDashboardConnectionByWrapper(conn)
+		}
+	}
+}
+
+// BroadcastToDashboard marshals a structured message and sends it to all connected clients.
+// This is the centralized function for all WebSocket writes to prevent concurrent access.
+func (ag *ArchGuardian) BroadcastToDashboard(messageType string, data interface{}) {
+	wsMessage := createWebSocketMessage(messageType, data)
+
+	jsonData, err := json.Marshal(wsMessage)
+	if err != nil {
+		log.Printf("Failed to marshal WebSocket message: %v", err)
+		return
+	}
+
+	ag.connMutex.Lock()
+	conns := make([]*wsConnection, len(ag.dashboardConns))
+	copy(conns, ag.dashboardConns)
+	ag.connMutex.Unlock()
+
+	for _, conn := range conns {
+		if err := conn.WriteMessage(websocket.TextMessage, jsonData); err != nil {
 			log.Printf("Failed to send message to dashboard client: %v", err)
 			// Remove broken connection
 			go ag.removeDashboardConnectionByWrapper(conn)
@@ -827,24 +852,7 @@ func (ag *ArchGuardian) sendProgressUpdate(phase string, progress float64, messa
 		"timestamp": time.Now().Format(time.RFC3339),
 	}
 
-	// Create WebSocket message
-	wsMessage := createWebSocketMessage("scan_progress", progressUpdate)
-
-	// Broadcast to all connected clients
-	ag.connMutex.Lock()
-	// Create a copy of connections to avoid holding lock during writes
-	conns := make([]*wsConnection, len(ag.dashboardConns))
-	copy(conns, ag.dashboardConns)
-	ag.connMutex.Unlock()
-
-	// Write to connections without holding the list mutex
-	for _, conn := range conns {
-		if err := conn.WriteJSON(wsMessage); err != nil {
-			log.Printf("Failed to send progress update to dashboard client: %v", err)
-			// Remove broken connection
-			go ag.removeDashboardConnectionByWrapper(conn)
-		}
-	}
+	ag.BroadcastToDashboard("scan_progress", progressUpdate)
 }
 
 // GetScanner returns the scanner instance
