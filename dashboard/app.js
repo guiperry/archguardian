@@ -28,10 +28,17 @@ class ArchGuardianDashboard {
         try { this.appendConsoleLog('Dashboard initialized'); } catch (e) { /* silent */ }
     }
     checkProjectStarted() {
-        // Check if a project was previously started
-        if (localStorage.getItem('projectStarted') === 'true') {
-            this.projectStarted = true;
-            this.showProjectNavigation();
+        // Clear project state on fresh load - user must select a project each time
+        localStorage.removeItem('projectStarted');
+        this.projectStarted = false;
+        this.currentProjectId = null;
+        this.currentProjectName = null;
+        this.projectProgress = {}; // Track progress for each project
+        
+        // Ensure project navigation is hidden on load
+        const projectNav = document.getElementById('project-nav');
+        if (projectNav) {
+            projectNav.style.display = 'none';
         }
     }
 
@@ -40,13 +47,23 @@ class ArchGuardianDashboard {
         navBtns.forEach(btn => {
             btn.addEventListener('click', () => {
                 const view = btn.dataset.view;
-                this.switchView(view);
+                // Only switch view if the button has a data-view attribute
+                if (view) {
+                    this.switchView(view);
+                }
             });
         });
 
     }
 
     switchView(view) {
+        // Check if view exists before trying to switch
+        const viewElement = document.getElementById(`${view}-view`);
+        if (!viewElement) {
+            console.warn(`View "${view}" does not exist`);
+            return;
+        }
+
         // Hide all views
         document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
 
@@ -54,10 +71,13 @@ class ArchGuardianDashboard {
         document.querySelectorAll('.nav-btn').forEach(btn => btn.classList.remove('active'));
 
         // Show selected view
-        document.getElementById(`${view}-view`).classList.add('active');
+        viewElement.classList.add('active');
 
         // Add active class to nav button
-        document.querySelector(`[data-view="${view}"]`).classList.add('active');
+        const navButton = document.querySelector(`[data-view="${view}"]`);
+        if (navButton) {
+            navButton.classList.add('active');
+        }
 
         this.currentView = view;
 
@@ -292,6 +312,12 @@ class ArchGuardianDashboard {
                 const logMessage = data.data?.message || data.message || '';
                 this.appendConsoleLog(logMessage);
                 break;
+            case 'scan_progress':
+                this.handleScanProgress(data);
+                break;
+            case 'scan_complete':
+                this.handleScanComplete(data);
+                break;
         }
     }
 
@@ -343,6 +369,121 @@ class ArchGuardianDashboard {
         }
     }
 
+    handleScanProgress(data) {
+        const projectId = data.project_id;
+        const progress = data.progress || 0;
+        const message = data.message || 'Scanning...';
+        
+        // Store progress data
+        this.projectProgress[projectId] = {
+            progress: progress,
+            message: message
+        };
+        
+        // Update the navbar status if this is the current project
+        if (this.currentProjectId === projectId) {
+            this.updateProjectStatusLabel(this.currentProjectName, 'Scanning', progress, message);
+        }
+        
+        // Update the project card if visible
+        this.updateProjectCardProgress(projectId, progress, message);
+        
+        // Log progress
+        this.appendConsoleLog(`📊 Scan progress: ${Math.round(progress)}% - ${message}`);
+    }
+
+    updateProjectStatusLabel(projectName, status, progress = null, message = null) {
+        const statusLabel = document.getElementById('project-status-label');
+        if (!statusLabel) return;
+        
+        const projectNameEl = statusLabel.querySelector('.status-project-name');
+        const statusTextEl = statusLabel.querySelector('.status-text');
+        const progressContainer = statusLabel.querySelector('.status-progress-container');
+        const progressFill = statusLabel.querySelector('.status-progress-fill');
+        const progressText = statusLabel.querySelector('.status-progress-text');
+        
+        if (projectName) {
+            statusLabel.style.display = 'flex';
+            if (projectNameEl) projectNameEl.textContent = projectName;
+        }
+        
+        if (statusTextEl) {
+            statusTextEl.textContent = status;
+            statusTextEl.className = 'status-text';
+            if (status.toLowerCase() === 'scanning') {
+                statusTextEl.classList.add('scanning');
+            } else if (status.toLowerCase() === 'idle') {
+                statusTextEl.classList.add('idle');
+            } else if (status.toLowerCase() === 'error') {
+                statusTextEl.classList.add('error');
+            }
+        }
+        
+        // Show/hide progress bar
+        if (progress !== null && status.toLowerCase() === 'scanning') {
+            if (progressContainer) progressContainer.style.display = 'flex';
+            if (progressFill) progressFill.style.width = `${progress}%`;
+            if (progressText) progressText.textContent = `${Math.round(progress)}%`;
+        } else {
+            if (progressContainer) progressContainer.style.display = 'none';
+        }
+    }
+
+    updateProjectCardProgress(projectId, progress, message) {
+        const projectCard = document.querySelector(`.project-card[data-project-id="${projectId}"]`);
+        if (!projectCard) return;
+        
+        const statusEl = projectCard.querySelector('.project-status');
+        if (!statusEl) return;
+        
+        // Check if progress bar already exists
+        let progressBar = projectCard.querySelector('.project-progress-bar');
+        if (!progressBar) {
+            // Create progress bar
+            progressBar = document.createElement('div');
+            progressBar.className = 'project-progress-bar';
+            progressBar.innerHTML = `
+                <div class="project-progress-fill" style="width: 0%"></div>
+                <div class="project-progress-text">0%</div>
+            `;
+            statusEl.appendChild(progressBar);
+        }
+        
+        // Update progress
+        const progressFill = progressBar.querySelector('.project-progress-fill');
+        const progressText = progressBar.querySelector('.project-progress-text');
+        if (progressFill) progressFill.style.width = `${progress}%`;
+        if (progressText) progressText.textContent = `${Math.round(progress)}% - ${message}`;
+    }
+
+    handleScanComplete(data) {
+        const projectId = data.project_id;
+        
+        // Clear progress data
+        delete this.projectProgress[projectId];
+        
+        // Update the navbar status if this is the current project
+        if (this.currentProjectId === projectId) {
+            this.updateProjectStatusLabel(this.currentProjectName, 'Idle', null, null);
+        }
+        
+        // Remove progress bar from project card
+        const projectCard = document.querySelector(`.project-card[data-project-id="${projectId}"]`);
+        if (projectCard) {
+            const progressBar = projectCard.querySelector('.project-progress-bar');
+            if (progressBar) {
+                progressBar.remove();
+            }
+        }
+        
+        // Show notification
+        this.showNotification('Scan completed successfully!', 'success');
+        this.appendConsoleLog('✅ Scan completed successfully');
+        
+        // Refresh project list to update status
+        this.loadProjects();
+    }
+
     async loadInitialData() {
         try {
             // Load knowledge graph data
@@ -382,10 +523,12 @@ class ArchGuardianDashboard {
             const modalList = document.getElementById('modal-projects-list');
             if (modalList) modalList.innerHTML = '<div class="projects-spinner">Loading projects...</div>'; // Use relative path for API calls
             const response = await fetch('/api/v1/projects');
-            const projects = await response.json();
+            const data = await response.json();
+            // Extract projects array from response object
+            const projects = data.projects || [];
             // Render projects in both the main projects view and the modal (if open)
-            this.renderProjects(projects || [], '#projects-list');
-            this.renderProjects(projects || [], '#modal-projects-list');
+            this.renderProjects(projects, '#projects-list');
+            this.renderProjects(projects, '#modal-projects-list');
         } catch (error) {
             console.error('Failed to load projects:', error);
             const mainList = document.getElementById('projects-list');
@@ -559,6 +702,19 @@ class ArchGuardianDashboard {
         // Track the active project id for view-specific loads
         this.currentProjectId = projectId;
 
+        // Fetch project details to get the name
+        try {
+            const projectResp = await fetch(`/api/v1/projects/${projectId}`);
+            if (projectResp.ok) {
+                const projectData = await projectResp.json();
+                this.currentProjectName = projectData.name || 'Unknown Project';
+                // Update status label to show project is being started
+                this.updateProjectStatusLabel(this.currentProjectName, 'Starting...', null, null);
+            }
+        } catch (e) {
+            console.warn('Failed to fetch project details:', e);
+        }
+
         // Show the project-specific navigation links when starting a scan
         this.showProjectNavigation();
 
@@ -614,6 +770,8 @@ class ArchGuardianDashboard {
                 this.showNotification('Scan started but the project status did not update quickly. You may need to refresh.', 'warning');
             } else {
                 this.showNotification('Scan started and confirmed!', 'success');
+                // Update status label to show scanning
+                this.updateProjectStatusLabel(this.currentProjectName, 'Scanning', 0, 'Initializing...');
             }
 
             // Mark project as started
@@ -1963,6 +2121,26 @@ style.textContent = `
 
     .project-status .status-idle { color: var(--text-secondary); }
     .project-status .status-scanning { color: var(--primary-color); }
+
+    .project-progress-bar {
+        margin-top: 0.5rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    .project-progress-fill {
+        height: 6px;
+        background: var(--primary-color);
+        border-radius: 3px;
+        transition: width 0.3s ease;
+    }
+
+    .project-progress-text {
+        font-size: 0.75rem;
+        color: var(--text-secondary);
+        white-space: nowrap;
+    }
 
     .project-buttons {
         display: flex;

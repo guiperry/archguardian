@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
@@ -12,6 +14,7 @@ import (
 	"archguardian/internal/config"
 	"archguardian/internal/guardian"
 	"archguardian/internal/project"
+	"archguardian/internal/scan"
 	"archguardian/internal/websocket"
 
 	"github.com/gorilla/mux"
@@ -30,7 +33,8 @@ type ArchGuardian struct {
 	AuthService  *auth.AuthService
 	WSManager    *websocket.WebSocketManager
 	Guardian     *guardian.ArchGuardian
-	FS           fs.FS // For serving embedded files
+	ScanManager  *scan.ScanManager // Scan job manager
+	FS           fs.FS             // For serving embedded files
 }
 
 // NewServer creates a new HTTP server
@@ -124,6 +128,10 @@ func setupRoutes(router *mux.Router, guardian *ArchGuardian, authService *auth.A
 		handleDeleteProject(w, r, guardian.ProjectStore)
 	}).Methods("DELETE")
 
+	api.HandleFunc("/projects/{id}/scan", func(w http.ResponseWriter, r *http.Request) {
+		handleStartProjectScan(w, r, guardian)
+	}).Methods("POST")
+
 	// Dashboard data endpoints
 	api.HandleFunc("/knowledge-graph", authService.OptionalAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		handleEnhancedKnowledgeGraph(w, r, guardian)
@@ -198,51 +206,14 @@ func handleGitHubAuth(w http.ResponseWriter, r *http.Request, authService *auth.
 
 // handleGitHubCallback handles GitHub OAuth callback
 func handleGitHubCallback(w http.ResponseWriter, r *http.Request, authService *auth.AuthService) {
-	code := r.URL.Query().Get("code")
-	state := r.URL.Query().Get("state")
-	
-	if code == "" {
-		http.Error(w, "Missing authorization code", http.StatusBadRequest)
-		return
-	}
-	
-	if state == "" {
-		http.Error(w, "Missing state parameter", http.StatusBadRequest)
-		return
-	}
-	
-	// Exchange code for access token
-	githubAuth, err := authService.ExchangeGitHubCode(code)
+	redirectURL, err := authService.HandleGitHubCallback(r)
 	if err != nil {
-		log.Printf("Failed to exchange GitHub code: %v", err)
-		http.Error(w, "Failed to authenticate with GitHub", http.StatusInternalServerError)
+		log.Printf("GitHub callback error: %v", err)
+		http.Error(w, "Authentication failed", http.StatusUnauthorized)
 		return
 	}
-	
-	// Get user info from GitHub
-	githubUser, err := authService.GetGitHubUser(githubAuth.AccessToken)
-	if err != nil {
-		log.Printf("Failed to get GitHub user: %v", err)
-		http.Error(w, "Failed to get user information", http.StatusInternalServerError)
-		return
-	}
-	
-	// Create or update user
-	user := authService.CreateOrUpdateUser(githubUser)
-	
-	// Store GitHub token
-	authService.StoreGitHubToken(user.ID, githubAuth)
-	
-	// Generate JWT token (store it for future use if needed)
-	_, err = authService.GenerateJWT(user)
-	if err != nil {
-		log.Printf("Failed to generate JWT: %v", err)
-		http.Error(w, "Failed to generate authentication token", http.StatusInternalServerError)
-		return
-	}
-	
-	// For now, just redirect to dashboard - session management will be handled by the auth service
-	http.Redirect(w, r, "/?auth_success=true", http.StatusTemporaryRedirect)
+
+	http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 }
 
 // handleGitHubAuthStatus handles GitHub authentication status check
@@ -260,34 +231,181 @@ func handleGetProjects(w http.ResponseWriter, _ *http.Request, projectStore *pro
 	w.Header().Set("Content-Type", "application/json")
 
 	projects := projectStore.GetAll()
-	w.WriteHeader(http.StatusOK)
 
-	// Simple JSON response
-	if len(projects) == 0 {
-		w.Write([]byte(`{"projects":[],"total":0}`))
+	// Create proper JSON response
+	response := map[string]interface{}{
+		"projects": projects,
+		"total":    len(projects),
+	}
+
+	jsonData, err := json.Marshal(response)
+	if err != nil {
+		http.Error(w, "Failed to marshal projects", http.StatusInternalServerError)
 		return
 	}
 
-	// TODO: Properly marshal projects
-	w.Write([]byte(`{"projects":[],"total":0}`))
+	w.WriteHeader(http.StatusOK)
+	w.Write(jsonData)
 }
 
 // handleCreateProject creates a new project
-func handleCreateProject(w http.ResponseWriter, _ *http.Request, _ *project.ProjectStore) {
+func handleCreateProject(w http.ResponseWriter, r *http.Request, projectStore *project.ProjectStore) {
 	w.Header().Set("Content-Type", "application/json")
-	http.Error(w, "Not implemented", http.StatusNotImplemented)
+
+	var newProject struct {
+		Name string `json:"name"`
+		Path string `json:"path"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&newProject); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	project := &project.Project{
+		ID:        generateProjectID(),
+		Name:      newProject.Name,
+		Path:      newProject.Path,
+		Status:    "idle",
+		CreatedAt: time.Now(),
+	}
+
+	if err := projectStore.Create(project); err != nil {
+		http.Error(w, "Failed to create project", http.StatusInternalServerError)
+		return
+	}
+
+	response := map[string]interface{}{
+		"success": true,
+		"project": project,
+	}
+
+	jsonData, err := json.Marshal(response)
+	if err != nil {
+		http.Error(w, "Failed to marshal response", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
+	w.Write(jsonData)
 }
 
 // handleGetProject returns a specific project
-func handleGetProject(w http.ResponseWriter, _ *http.Request, _ *project.ProjectStore) {
+func handleGetProject(w http.ResponseWriter, r *http.Request, projectStore *project.ProjectStore) {
 	w.Header().Set("Content-Type", "application/json")
-	http.Error(w, "Not implemented", http.StatusNotImplemented)
+
+	vars := mux.Vars(r)
+	id := vars["id"]
+
+	project, exists := projectStore.Get(id)
+	if !exists {
+		http.Error(w, "Project not found", http.StatusNotFound)
+		return
+	}
+
+	jsonData, err := json.Marshal(project)
+	if err != nil {
+		http.Error(w, "Failed to marshal project", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write(jsonData)
 }
 
 // handleDeleteProject deletes a project
-func handleDeleteProject(w http.ResponseWriter, _ *http.Request, _ *project.ProjectStore) {
+func handleDeleteProject(w http.ResponseWriter, r *http.Request, projectStore *project.ProjectStore) {
 	w.Header().Set("Content-Type", "application/json")
-	http.Error(w, "Not implemented", http.StatusNotImplemented)
+
+	vars := mux.Vars(r)
+	id := vars["id"]
+
+	if err := projectStore.Delete(id); err != nil {
+		http.Error(w, "Failed to delete project", http.StatusInternalServerError)
+		return
+	}
+
+	response := map[string]bool{"success": true}
+	jsonData, _ := json.Marshal(response)
+	w.WriteHeader(http.StatusOK)
+	w.Write(jsonData)
+}
+
+// handleStartProjectScan starts a scan for a specific project
+func handleStartProjectScan(w http.ResponseWriter, r *http.Request, guardian *ArchGuardian) {
+	w.Header().Set("Content-Type", "application/json")
+
+	vars := mux.Vars(r)
+	projectID := vars["id"]
+
+	// Verify project exists
+	proj, exists := guardian.ProjectStore.Get(projectID)
+	if !exists {
+		http.Error(w, "Project not found", http.StatusNotFound)
+		return
+	}
+
+	// Update project status to scanning
+	proj.Status = "scanning"
+	if err := guardian.ProjectStore.Update(proj); err != nil {
+		log.Printf("Failed to update project status: %v", err)
+	}
+
+	// Log the scan trigger
+	log.Printf("🔄 Scan triggered for project: %s (ID: %s, Path: %s)", proj.Name, projectID, proj.Path)
+
+	// Create and start a scan job using the ScanManager
+	var jobID string
+	if guardian.ScanManager != nil {
+		job, err := guardian.ScanManager.CreateJob(projectID, proj.Path)
+		if err != nil {
+			log.Printf("❌ Failed to create scan job: %v", err)
+			http.Error(w, fmt.Sprintf("Failed to create scan job: %v", err), http.StatusInternalServerError)
+			return
+		}
+		jobID = job.GetID()
+
+		// Start the job
+		if err := guardian.ScanManager.StartJob(jobID); err != nil {
+			log.Printf("❌ Failed to start scan job: %v", err)
+			http.Error(w, fmt.Sprintf("Failed to start scan job: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		log.Printf("✅ Scan job %s created and started for project %s", jobID, projectID)
+	} else {
+		log.Printf("⚠️  ScanManager not available, cannot start scan")
+		http.Error(w, "Scan manager not available", http.StatusInternalServerError)
+		return
+	}
+
+	// Broadcast scan started event via WebSocket
+	if guardian.WSManager != nil {
+		guardian.WSManager.BroadcastMessage("scan_started", map[string]interface{}{
+			"project_id":   projectID,
+			"project_name": proj.Name,
+			"job_id":       jobID,
+			"timestamp":    time.Now().Format(time.RFC3339),
+		})
+	}
+
+	response := map[string]interface{}{
+		"success":    true,
+		"message":    "Scan started successfully",
+		"project_id": projectID,
+		"job_id":     jobID,
+		"status":     "scanning",
+		"timestamp":  time.Now().Format(time.RFC3339),
+	}
+
+	jsonData, _ := json.Marshal(response)
+	w.WriteHeader(http.StatusOK)
+	w.Write(jsonData)
+}
+
+// generateProjectID generates a unique project ID
+func generateProjectID() string {
+	return fmt.Sprintf("project_%d", time.Now().UnixNano())
 }
 
 // handleKnowledgeGraph returns knowledge graph data

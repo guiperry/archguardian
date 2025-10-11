@@ -15,9 +15,23 @@
             <div class="nav-brand">
                 <h1>🛡️ ArchGuardian</h1>
             </div>
+            <div class="nav-center">
+                <div id="project-status-label" class="project-status-label" style="display: none;">
+                    <span class="status-project-name">No project loaded</span>
+                    <span class="status-separator">•</span>
+                    <span class="status-text">Idle</span>
+                    <div class="status-progress-container" style="display: none;">
+                        <div class="status-progress-bar">
+                            <div class="status-progress-fill" style="width: 0%"></div>
+                        </div>
+                        <span class="status-progress-text">0%</span>
+                    </div>
+                </div>
+            </div>
             <div class="nav-links">
                 <button class="nav-btn active" data-view="console">Console</button> <!-- Always visible -->
                 <button class="nav-btn" data-view="settings">Settings</button> <!-- Always visible -->
+                <button class="nav-btn" onclick="window.dashboard.openProjectsModal()">Manage Projects</button>
                 <div class="theme-toggle">
                     <button id="theme-toggle" class="theme-toggle-btn" title="Toggle theme">
                         <span class="theme-icon">🌙</span>
@@ -48,7 +62,6 @@
                         <div class="console-header">
                             <h3>System Log</h3>
                             <div>
-                                <button class="console-action-btn" onclick="window.dashboard.openProjectsModal()">Manage Projects</button>
                                 <button class="console-clear-btn" onclick="window.dashboard.clearConsole()">Clear</button>
                             </div>
                         </div>

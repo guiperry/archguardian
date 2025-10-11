@@ -32,10 +32,13 @@ func (m *mockTextGenerator) GenerateText(prompt string) (string, error) {
 
 // mockTaskOrchestrator is a mock implementation for testing.
 type mockTaskOrchestrator struct {
-	ExecuteComplexTaskFunc func(ctx context.Context, complexPrompt string) (string, error)
-	wasCalled              bool
-	promptReceived         string
-	mu                     sync.Mutex
+	ExecuteComplexTaskFunc                 func(ctx context.Context, complexPrompt string) (string, error)
+	AnalyzeRecurringErrorFunc              func(ctx context.Context, codeWithError string) (string, error)
+	AnalyzeSystemicErrorsFunc              func(ctx context.Context, knowledgeGraph string) (string, error)
+	ExecuteComplexTaskWithDeepAnalysisFunc func(ctx context.Context, complexPrompt string, errorContext interface{}) (string, error)
+	wasCalled                              bool
+	promptReceived                         string
+	mu                                     sync.Mutex
 }
 
 func (m *mockTaskOrchestrator) ExecuteComplexTask(ctx context.Context, complexPrompt string) (string, error) {
@@ -48,6 +51,27 @@ func (m *mockTaskOrchestrator) ExecuteComplexTask(ctx context.Context, complexPr
 		return m.ExecuteComplexTaskFunc(ctx, complexPrompt)
 	}
 	return "orchestrator result", nil
+}
+
+func (m *mockTaskOrchestrator) AnalyzeRecurringError(ctx context.Context, codeWithError string) (string, error) {
+	if m.AnalyzeRecurringErrorFunc != nil {
+		return m.AnalyzeRecurringErrorFunc(ctx, codeWithError)
+	}
+	return "recurring error analysis result", nil
+}
+
+func (m *mockTaskOrchestrator) AnalyzeSystemicErrors(ctx context.Context, knowledgeGraph string) (string, error) {
+	if m.AnalyzeSystemicErrorsFunc != nil {
+		return m.AnalyzeSystemicErrorsFunc(ctx, knowledgeGraph)
+	}
+	return "systemic error analysis result", nil
+}
+
+func (m *mockTaskOrchestrator) ExecuteComplexTaskWithDeepAnalysis(ctx context.Context, complexPrompt string, errorContext interface{}) (string, error) {
+	if m.ExecuteComplexTaskWithDeepAnalysisFunc != nil {
+		return m.ExecuteComplexTaskWithDeepAnalysisFunc(ctx, complexPrompt, errorContext)
+	}
+	return "complex task with deep analysis result", nil
 }
 
 func (m *mockTaskOrchestrator) WasCalledWith(prompt string) bool {

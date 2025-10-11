@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"archguardian/inference_engine/deep_prompts"
 )
 
 // SubTask defines a single task to be executed by a worker model.
@@ -235,4 +237,155 @@ Based on your analysis, respond with a single JSON object with two keys:
 	// Target a powerful model for verification.
 	verificationJSON, err := to.delegator.GenerateSimple(ctx, to.verifierModel, verifierPrompt, "")
 	return verificationJSON, err
+}
+
+// AnalyzeRecurringError performs deep analysis on a recurring error using lateral thinking.
+// This should be called when the same error keeps appearing despite previous fixes.
+func (to *TaskOrchestrator) AnalyzeRecurringError(ctx context.Context, codeWithError string) (string, error) {
+	log.Println("Orchestrator: Starting deep analysis of recurring error...")
+
+	// Use the EliteProblemSolverPrompt for lateral thinking analysis
+	prompt := deep_prompts.GetEliteProblemSolverPrompt(codeWithError)
+
+	// Use the planner model (typically a powerful model like Gemini) for deep analysis
+	response, err := to.delegator.GenerateSimple(ctx, to.plannerModel, prompt, "")
+	if err != nil {
+		return "", fmt.Errorf("recurring error analysis failed: %w", err)
+	}
+
+	log.Println("Orchestrator: Recurring error analysis complete.")
+	return response, nil
+}
+
+// AnalyzeSystemicErrors performs systems thinking analysis on a large number of errors.
+// This should be called when there are many errors suggesting systemic issues.
+func (to *TaskOrchestrator) AnalyzeSystemicErrors(ctx context.Context, knowledgeGraph string) (string, error) {
+	log.Println("Orchestrator: Starting systemic error analysis...")
+
+	// Use the SystemsArchitectThinkingPrompt for systems thinking analysis
+	prompt := deep_prompts.GetSystemsArchitectThinkingPrompt(knowledgeGraph)
+
+	// Use the planner model (typically a powerful model like Gemini) for deep analysis
+	response, err := to.delegator.GenerateSimple(ctx, to.plannerModel, prompt, "")
+	if err != nil {
+		return "", fmt.Errorf("systemic error analysis failed: %w", err)
+	}
+
+	log.Println("Orchestrator: Systemic error analysis complete.")
+	return response, nil
+}
+
+// ExecuteComplexTaskWithDeepAnalysis orchestrates a complex task with optional deep analysis
+// based on error patterns detected during execution.
+func (to *TaskOrchestrator) ExecuteComplexTaskWithDeepAnalysis(ctx context.Context, complexPrompt string, errorContextInterface interface{}) (string, error) {
+	log.Println("Orchestrator: Starting complex task execution with deep analysis capability.")
+
+	// === STEP 1: Planning Phase ===
+	plan, err := to.generatePlan(ctx, complexPrompt)
+	if err != nil {
+		return "", fmt.Errorf("planning phase failed: %w", err)
+	}
+	log.Printf("Orchestrator: Plan generated with %d sub-tasks.", len(plan.SubTasks))
+
+	// === STEP 2: Execution Phase ===
+	subTaskResults, err := to.executeSubTasks(ctx, plan)
+	if err != nil {
+		log.Printf("Orchestrator: Execution phase completed with errors: %v", err)
+	} else {
+		log.Println("Orchestrator: Execution phase completed successfully.")
+	}
+
+	// === STEP 3: Check for error patterns and trigger deep analysis if needed ===
+	var deepAnalysisResult string
+	// Type assert the interface to ErrorContext
+	errorContext, ok := errorContextInterface.(*ErrorContext)
+	if ok && errorContext != nil {
+		if errorContext.IsRecurring {
+			log.Println("Orchestrator: Recurring error detected, triggering deep analysis...")
+			deepAnalysisResult, err = to.AnalyzeRecurringError(ctx, errorContext.CodeContext)
+			if err != nil {
+				log.Printf("Orchestrator: Deep analysis of recurring error failed: %v", err)
+			} else {
+				log.Println("Orchestrator: Deep analysis of recurring error completed.")
+			}
+		} else if errorContext.ErrorCount >= errorContext.SystemicThreshold {
+			log.Printf("Orchestrator: Large number of errors detected (%d >= %d), triggering systemic analysis...",
+				errorContext.ErrorCount, errorContext.SystemicThreshold)
+			deepAnalysisResult, err = to.AnalyzeSystemicErrors(ctx, errorContext.KnowledgeGraph)
+			if err != nil {
+				log.Printf("Orchestrator: Systemic error analysis failed: %v", err)
+			} else {
+				log.Println("Orchestrator: Systemic error analysis completed.")
+			}
+		}
+	}
+
+	// === STEP 4: Finalization Phase (incorporate deep analysis if available) ===
+	finalResult, err := to.finalizeResultsWithDeepAnalysis(ctx, complexPrompt, subTaskResults, deepAnalysisResult)
+	if err != nil {
+		return "", fmt.Errorf("finalization phase failed: %w", err)
+	}
+	log.Println("Orchestrator: Finalization complete.")
+
+	// === STEP 5: Verification Phase ===
+	verificationResult, err := to.verifyFinalOutput(ctx, complexPrompt, finalResult)
+	if err != nil {
+		log.Printf("Orchestrator: Verification phase failed: %v", err)
+	} else {
+		log.Printf("Orchestrator: Verification result: %s", verificationResult)
+	}
+
+	return finalResult, nil
+}
+
+// finalizeResultsWithDeepAnalysis synthesizes sub-task results with optional deep analysis insights.
+func (to *TaskOrchestrator) finalizeResultsWithDeepAnalysis(ctx context.Context, originalPrompt string, subTaskResults map[int]string, deepAnalysis string) (string, error) {
+	resultsJSON, _ := json.MarshalIndent(subTaskResults, "", "  ")
+
+	var finalizerPrompt string
+	if deepAnalysis != "" {
+		finalizerPrompt = fmt.Sprintf(`
+You are a final review AI. Your job is to synthesize the results of several sub-tasks into a single, coherent, and high-quality final response that directly addresses the user's original request.
+
+Additionally, you have access to a DEEP ANALYSIS that provides insights into recurring errors or systemic issues. Incorporate these insights into your final response.
+
+Original Request: "%s"
+
+Sub-task Results (JSON format, with task ID as key):
+%s
+
+Deep Analysis Insights:
+%s
+
+Synthesize these results and insights into a complete and final answer. If the original request was for code or a patch, generate the final, clean code that addresses both the immediate issues and the deeper systemic problems identified in the analysis.
+`, originalPrompt, string(resultsJSON), deepAnalysis)
+	} else {
+		finalizerPrompt = fmt.Sprintf(`
+You are a final review AI. Your job is to synthesize the results of several sub-tasks into a single, coherent, and high-quality final response that directly addresses the user's original request.
+
+Original Request: "%s"
+
+Sub-task Results (JSON format, with task ID as key):
+%s
+
+Synthesize these results into a complete and final answer. If the original request was for code or a patch, generate the final, clean code.
+`, originalPrompt, string(resultsJSON))
+	}
+
+	// Target a powerful model for the final synthesis/remediation.
+	finalResponse, err := to.delegator.GenerateSimple(ctx, to.finalizerModel, finalizerPrompt, "")
+	if err != nil {
+		return "", err
+	}
+
+	return finalResponse, nil
+}
+
+// ErrorContext provides context about errors for triggering deep analysis.
+type ErrorContext struct {
+	IsRecurring       bool   // True if this is a recurring error
+	ErrorCount        int    // Total number of errors detected
+	SystemicThreshold int    // Threshold for triggering systemic analysis (e.g., 10)
+	CodeContext       string // Code snippet with the recurring error
+	KnowledgeGraph    string // JSON representation of the knowledge graph for systemic analysis
 }

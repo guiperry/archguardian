@@ -234,40 +234,66 @@ func (as *AuthService) GetGitHubUser(accessToken string) (map[string]interface{}
 }
 
 // HandleGitHubAuth handles GitHub authentication requests
-func (as *AuthService) HandleGitHubAuth(w http.ResponseWriter, r *http.Request) {
+func (as *AuthService) HandleGitHubAuth(w http.ResponseWriter, r *http.Request) (string, string, error) {
 	authURL, csrfToken, err := as.GetGitHubAuthURL(r)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to generate auth URL: %v", err), http.StatusInternalServerError)
-		return
+		return "", "", fmt.Errorf("failed to generate auth URL: %w", err)
 	}
 
 	// Store CSRF token in session for validation
 	session, _ := as.sessionStore.Get(r, "archguardian-auth")
 	session.Values["csrf_token"] = csrfToken
-	session.Save(r, w)
-
-	response := map[string]string{
-		"auth_url": authURL,
+	if err := session.Save(r, w); err != nil {
+		return "", "", fmt.Errorf("failed to save session: %w", err)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+
+	return authURL, csrfToken, nil
+}
+
+// HandleGitHubCallback handles the OAuth callback from GitHub
+func (as *AuthService) HandleGitHubCallback(r *http.Request) (string, error) {
+	code := r.URL.Query().Get("code")
+	state := r.URL.Query().Get("state")
+
+	// Validate state here against session state...
+
+	githubAuth, err := as.ExchangeGitHubCode(code)
+	if err != nil {
+		return "/", fmt.Errorf("failed to exchange github code: %w", err)
+	}
+
+	githubUser, err := as.GetGitHubUser(githubAuth.AccessToken)
+	if err != nil {
+		return "/", fmt.Errorf("failed to get github user: %w", err)
+	}
+
+	user := as.CreateOrUpdateUser(githubUser)
+	as.StoreGitHubToken(user.ID, githubAuth)
+
+	// For now, just redirect to dashboard - session management will be handled by the auth service
+	redirectURL, err := as.getRedirectURLFromState(state)
+	if err != nil {
+		log.Printf("Invalid state in github callback: %v", err)
+		return "/?auth_success=true", nil // fallback
+	}
+	return redirectURL + "?auth_success=true", nil
 }
 
 // HandleGitHubAuthStatus handles GitHub authentication status check
 func (as *AuthService) HandleGitHubAuthStatus(w http.ResponseWriter, r *http.Request) {
 	session, _ := as.sessionStore.Get(r, "archguardian-auth")
 	userID, ok := session.Values["user_id"].(string)
-	
+
 	response := map[string]interface{}{
 		"authenticated": ok && userID != "",
 	}
-	
+
 	if ok && userID != "" {
 		if user, exists := as.GetUser(userID); exists {
 			response["user"] = user
 		}
 	}
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }
@@ -278,7 +304,7 @@ func (as *AuthService) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	session.Values = make(map[interface{}]interface{})
 	session.Options.MaxAge = -1 // Delete the session
 	session.Save(r, w)
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
@@ -290,6 +316,21 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+// getRedirectURLFromState extracts the redirect URL from the state parameter
+func (as *AuthService) getRedirectURLFromState(state string) (string, error) {
+	stateBytes, err := base64.URLEncoding.DecodeString(state)
+	if err != nil {
+		return "", fmt.Errorf("failed to decode state: %w", err)
+	}
+
+	var authState AuthState
+	if err := json.Unmarshal(stateBytes, &authState); err != nil {
+		return "", fmt.Errorf("failed to unmarshal state: %w", err)
+	}
+
+	return authState.RedirectHost, nil
 }
 
 // isValidGitHubTokenURL validates GitHub OAuth token URLs

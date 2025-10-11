@@ -19,7 +19,7 @@ all: cross-compile
 
 # Build the application for the current OS and architecture
 build: build-frontend
-	@echo "Building ArchGuardian for local development..."
+	@echo "Building ArchGuardian go backend for local development..."
 	@$(GO) build -o $(BINARY_NAME) $(CMD_PATH)
 	@echo "✅ Build complete: ./$(BINARY_NAME)"
 

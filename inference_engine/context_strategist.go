@@ -45,6 +45,9 @@ const (
 // TaskOrchestratorInterface defines the interface for task orchestrators
 type TaskOrchestratorInterface interface {
 	ExecuteComplexTask(ctx context.Context, complexPrompt string) (string, error)
+	AnalyzeRecurringError(ctx context.Context, codeWithError string) (string, error)
+	AnalyzeSystemicErrors(ctx context.Context, knowledgeGraph string) (string, error)
+	ExecuteComplexTaskWithDeepAnalysis(ctx context.Context, complexPrompt string, errorContext interface{}) (string, error)
 }
 
 // ContextStrategist decides on and executes a strategy for handling large text inputs.

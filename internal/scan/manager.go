@@ -14,13 +14,13 @@ import (
 type ScanState string
 
 const (
-	ScanStateIdle       ScanState = "idle"
-	ScanStateQueued     ScanState = "queued"
-	ScanStateScanning   ScanState = "scanning"
-	ScanStateAnalyzing  ScanState = "analyzing"
-	ScanStateComplete   ScanState = "complete"
-	ScanStateError      ScanState = "error"
-	ScanStateCancelled  ScanState = "cancelled"
+	ScanStateIdle      ScanState = "idle"
+	ScanStateQueued    ScanState = "queued"
+	ScanStateScanning  ScanState = "scanning"
+	ScanStateAnalyzing ScanState = "analyzing"
+	ScanStateComplete  ScanState = "complete"
+	ScanStateError     ScanState = "error"
+	ScanStateCancelled ScanState = "cancelled"
 )
 
 // ScanJob represents a scan job with metadata and state tracking
@@ -37,6 +37,11 @@ type ScanJob struct {
 	Error       string                 `json:"error,omitempty"`
 	Metadata    map[string]interface{} `json:"metadata"`
 	Result      *ScanResult            `json:"result,omitempty"`
+}
+
+// GetID returns the job ID (implements ScanJobInterface)
+func (sj *ScanJob) GetID() string {
+	return sj.ID
 }
 
 // ScanResult contains the results of a completed scan
@@ -128,11 +133,11 @@ func NewScanManager(cfg *config.Config, guardian *guardian.ArchGuardian) *ScanMa
 	sm.workers = make([]*scanWorker, sm.workerCount)
 	for i := 0; i < sm.workerCount; i++ {
 		sm.workers[i] = &scanWorker{
-			id:       i,
-			manager:  sm,
-			jobChan:  make(chan *ScanJob, 1),
-			quit:     make(chan bool),
-			running:  false,
+			id:      i,
+			manager: sm,
+			jobChan: make(chan *ScanJob, 1),
+			quit:    make(chan bool),
+			running: false,
 		}
 	}
 
@@ -170,7 +175,6 @@ func (sm *ScanManager) CreateJob(projectID, projectPath string) (*ScanJob, error
 
 	// Acquire project lock
 	projectLock.Lock()
-	defer projectLock.Unlock()
 
 	// Create new job
 	job := &ScanJob{
@@ -245,10 +249,11 @@ func (sm *ScanManager) UpdateJobProgress(jobID string, progress float64, message
 		sm.guardian.BroadcastToDashboard(fmt.Sprintf(`{
 			"type": "scan_progress",
 			"job_id": "%s",
+			"project_id": "%s",
 			"progress": %.1f,
 			"message": "%s",
 			"timestamp": "%s"
-		}`, jobID, progress, message, time.Now().Format(time.RFC3339)))
+		}`, jobID, job.ProjectID, progress, message, time.Now().Format(time.RFC3339)))
 	}
 
 	return nil
@@ -270,6 +275,16 @@ func (sm *ScanManager) CompleteJob(jobID string, result *ScanResult) error {
 	job.Result = result
 	job.Progress = 100.0
 	job.Message = "Scan completed successfully"
+
+	// Broadcast completion via WebSocket
+	if sm.guardian != nil {
+		sm.guardian.BroadcastToDashboard(fmt.Sprintf(`{
+			"type": "scan_complete",
+			"job_id": "%s",
+			"project_id": "%s",
+			"timestamp": "%s"
+		}`, jobID, job.ProjectID, time.Now().Format(time.RFC3339)))
+	}
 
 	// Release project lock
 	sm.releaseProjectLock(job.ProjectID)
@@ -395,11 +410,11 @@ func (sm *ScanManager) GetQueueStatus() map[string]interface{} {
 	sm.jobMutex.RUnlock()
 
 	return map[string]interface{}{
-		"queue_length":    queueLength,
-		"active_jobs":     activeJobs,
-		"max_concurrent":  sm.maxConcurrent,
-		"worker_count":    sm.workerCount,
-		"total_jobs":      len(sm.jobs),
+		"queue_length":   queueLength,
+		"active_jobs":    activeJobs,
+		"max_concurrent": sm.maxConcurrent,
+		"worker_count":   sm.workerCount,
+		"total_jobs":     len(sm.jobs),
 	}
 }
 
@@ -433,9 +448,9 @@ func (sm *ScanManager) assignJobToWorker(job *ScanJob) {
 
 // releaseProjectLock releases the lock for a project
 func (sm *ScanManager) releaseProjectLock(projectID string) {
-	sm.projectLockMutex.RLock()
+	sm.projectLockMutex.Lock()
 	projectLock, exists := sm.projectLocks[projectID]
-	sm.projectLockMutex.RUnlock()
+	sm.projectLockMutex.Unlock()
 
 	if exists {
 		projectLock.Unlock()
@@ -631,8 +646,8 @@ func (sm *ScanManager) GetProjectLockStatus() map[string]interface{} {
 		sm.jobMutex.RUnlock()
 
 		status[projectID] = map[string]interface{}{
-			"locked":        runningJobs > 0,
-			"running_jobs":  runningJobs,
+			"locked":       runningJobs > 0,
+			"running_jobs": runningJobs,
 		}
 	}
 
