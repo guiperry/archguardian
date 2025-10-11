@@ -194,7 +194,27 @@ func handleGitHubAuth(w http.ResponseWriter, r *http.Request, authService *auth.
 
 	switch r.Method {
 	case "GET": // Only handle GET for auth URL
-		authService.HandleGitHubAuth(w, r)
+		authURL, csrfToken, err := authService.HandleGitHubAuth(w, r)
+		if err != nil {
+			log.Printf("GitHub auth error: %v", err)
+			response := map[string]interface{}{
+				"error": map[string]string{
+					"message": err.Error(),
+				},
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(response)
+			return
+		}
+
+		response := map[string]interface{}{
+			"data": map[string]string{
+				"auth_url":   authURL,
+				"csrf_token": csrfToken,
+			},
+		}
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(response)
 
 	case "POST":
 		http.Error(w, "Not implemented", http.StatusNotImplemented)

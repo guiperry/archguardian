@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -746,4 +747,62 @@ func parseInt(s string) (int, error) {
 
 func parseBool(s string) (bool, error) {
 	return fmt.Sprintf("%s", s) == "true", nil
+}
+
+// GetAppDataDir returns the OS-specific application data directory for ArchGuardian
+// Returns:
+//   - Linux: $XDG_DATA_HOME/archguardian or $HOME/.local/share/archguardian
+//   - macOS: $HOME/Library/Application Support/archguardian
+//   - Windows: %APPDATA%\archguardian
+func GetAppDataDir() (string, error) {
+	var baseDir string
+	var appDir string
+
+	switch runtime.GOOS {
+	case "windows":
+		// Windows: Use APPDATA environment variable
+		baseDir = os.Getenv("APPDATA")
+		if baseDir == "" {
+			return "", fmt.Errorf("APPDATA environment variable not set")
+		}
+		appDir = filepath.Join(baseDir, "archguardian")
+
+	case "darwin":
+		// macOS: Use ~/Library/Application Support
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("failed to get user home directory: %w", err)
+		}
+		appDir = filepath.Join(homeDir, "Library", "Application Support", "archguardian")
+
+	default:
+		// Linux and other Unix-like systems: Use XDG_DATA_HOME or ~/.local/share
+		xdgDataHome := os.Getenv("XDG_DATA_HOME")
+		if xdgDataHome != "" {
+			appDir = filepath.Join(xdgDataHome, "archguardian")
+		} else {
+			homeDir, err := os.UserHomeDir()
+			if err != nil {
+				return "", fmt.Errorf("failed to get user home directory: %w", err)
+			}
+			appDir = filepath.Join(homeDir, ".local", "share", "archguardian")
+		}
+	}
+
+	// Create the directory if it doesn't exist
+	if err := os.MkdirAll(appDir, 0700); err != nil {
+		return "", fmt.Errorf("failed to create application data directory: %w", err)
+	}
+
+	return appDir, nil
+}
+
+// GetArchGuardianDataPath returns the full path to the archguardian-data directory
+// in the OS-specific application data location
+func GetArchGuardianDataPath() (string, error) {
+	appDir, err := GetAppDataDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(appDir, "archguardian-data"), nil
 }

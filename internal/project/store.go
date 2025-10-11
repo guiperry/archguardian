@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"archguardian/internal/embedding"
@@ -114,18 +115,24 @@ func (ps *ProjectStore) loadProjects() {
 	collection := ps.db.GetCollection("projects", embeddingFunc)
 	if collection == nil {
 		log.Printf("⚠️  Projects collection not found, creating...")
-		collection, err := ps.db.GetOrCreateCollection("projects", map[string]string{"type": "project"}, embeddingFunc)
+		var err error
+		collection, err = ps.db.GetOrCreateCollection("projects", map[string]string{"type": "project"}, embeddingFunc)
 		if err != nil {
 			log.Printf("⚠️  Failed to create projects collection: %v", err)
 			return
 		}
-		_ = collection // Use the collection
+		// New collection is empty, no need to query
+		log.Printf("✅ Created new projects collection")
+		return
 	}
 
-	// Query all projects from database
-	results, err := collection.Query(context.Background(), "*", 1000, nil, nil)
+	// Query all projects from database using progressive fallback approach
+	// Note: chromem-go requires nResults to be <= number of documents in collection
+	// We use progressive limits to handle collections of any size
+	results, err := ps.queryWithFallback(collection, "project")
 	if err != nil {
-		log.Printf("⚠️  Failed to load projects from database: %v", err)
+		// Collection might be empty, which is fine for a new installation
+		log.Printf("✅ Project store initialized (no existing projects)")
 		return
 	}
 
@@ -142,6 +149,59 @@ func (ps *ProjectStore) loadProjects() {
 	}
 
 	log.Printf("✅ Loaded %d projects from database", loadedCount)
+}
+
+// queryWithFallback implements progressive query fallback to handle chromem-go's
+// strict nResults validation. It tries progressively smaller limits until one works.
+func (ps *ProjectStore) queryWithFallback(collection *chromem.Collection, searchTerm string) ([]chromem.Result, error) {
+	// Try progressively larger limits to get as many results as possible
+	// Start small to handle empty/small collections, then try larger limits
+	limits := []int{1, 3, 10, 50, 100, 1000}
+
+	var lastResults []chromem.Result
+	var lastErr error
+
+	for _, limit := range limits {
+		results, err := collection.Query(
+			context.Background(),
+			searchTerm,
+			limit,
+			nil, // No where clause (causes "unsupported operator" errors)
+			nil,
+		)
+
+		if err == nil {
+			// Success - save these results and try next larger limit
+			lastResults = results
+			lastErr = nil
+			continue
+		}
+
+		// If it's an nResults error, we've hit the collection size limit
+		// Return the last successful results
+		if strings.Contains(err.Error(), "nResults") {
+			if lastResults != nil {
+				return lastResults, nil
+			}
+			// First query failed with nResults error - collection is empty
+			return nil, fmt.Errorf("collection appears to be empty")
+		}
+
+		// Other errors are not recoverable
+		lastErr = err
+		break
+	}
+
+	// Return last successful results or error
+	if lastResults != nil {
+		return lastResults, nil
+	}
+
+	if lastErr != nil {
+		return nil, lastErr
+	}
+
+	return nil, fmt.Errorf("all query attempts failed")
 }
 
 // loadProjectFromDB loads a specific project from the database

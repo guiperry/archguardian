@@ -16,6 +16,7 @@ type RiskDiagnoser struct {
 	ai                  interface{} // TODO: Use proper AI inference engine type
 	codacyClient        interface{} // TODO: Use proper Codacy client type
 	compatibilityIssues []types.TechnicalDebtItem
+	latestAssessment    *types.RiskAssessment
 	mutex               sync.RWMutex
 }
 
@@ -41,20 +42,33 @@ func (rd *RiskDiagnoser) AddManualIssues(issues []types.TechnicalDebtItem) {
 func (rd *RiskDiagnoser) DiagnoseRisks(ctx context.Context) (*types.RiskAssessment, error) {
 	log.Println("🔬 Diagnosing system risks...")
 
+	rd.mutex.Lock()
+	defer rd.mutex.Unlock()
+
 	assessment := &types.RiskAssessment{
 		TechnicalDebt:         make([]types.TechnicalDebtItem, 0),
 		SecurityVulns:         make([]types.SecurityVulnerability, 0),
 		ObsoleteCode:          make([]types.ObsoleteCodeItem, 0),
 		DangerousDependencies: make([]types.DependencyRisk, 0),
+		CompatibilityIssues:   make([]types.TechnicalDebtItem, 0),
 		Timestamp:             time.Now(),
+	}
+
+	// Include compatibility issues that were added manually
+	if len(rd.compatibilityIssues) > 0 {
+		assessment.CompatibilityIssues = append(assessment.CompatibilityIssues, rd.compatibilityIssues...)
+		log.Printf("  📊 Included %d compatibility issues in assessment", len(rd.compatibilityIssues))
 	}
 
 	// TODO: Fetch Codacy issues if client is available
 	// TODO: Use AI for comprehensive risk analysis
 
-	// For now, return a basic assessment
+	// Calculate overall risk score
 	assessment.OverallScore = rd.calculateOverallRisk(assessment)
-	
+
+	// Store the latest assessment
+	rd.latestAssessment = assessment
+
 	// Validate the assessment data structure
 	validationData := map[string]interface{}{
 		"name":     "Risk Assessment",
@@ -71,6 +85,13 @@ func (rd *RiskDiagnoser) DiagnoseRisks(ctx context.Context) (*types.RiskAssessme
 	return assessment, nil
 }
 
+// GetLatestAssessment returns the most recent risk assessment
+func (rd *RiskDiagnoser) GetLatestAssessment() *types.RiskAssessment {
+	rd.mutex.RLock()
+	defer rd.mutex.RUnlock()
+	return rd.latestAssessment
+}
+
 // calculateOverallRisk calculates the overall risk score
 func (rd *RiskDiagnoser) calculateOverallRisk(assessment *types.RiskAssessment) float64 {
 	score := 0.0
@@ -80,6 +101,7 @@ func (rd *RiskDiagnoser) calculateOverallRisk(assessment *types.RiskAssessment) 
 	score += float64(len(assessment.TechnicalDebt)) * 2.0
 	score += float64(len(assessment.ObsoleteCode)) * 1.0
 	score += float64(len(assessment.DangerousDependencies)) * 5.0
+	score += float64(len(assessment.CompatibilityIssues)) * 0.5
 
 	// Normalize to 0-100 scale
 	return min(100.0, score)
@@ -227,6 +249,6 @@ func (rd *RiskDiagnoser) validateRiskData(data map[string]interface{}) bool {
 	severity := getStringField(data, "severity")
 	score := getFloatField(data, "score")
 	priority := getIntField(data, "priority")
-	
+
 	return name != "" && severity != "" && score >= 0 && priority >= 0
 }

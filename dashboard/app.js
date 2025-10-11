@@ -23,6 +23,7 @@ class ArchGuardianDashboard {
         this.setupCharts();
         this.setupConnectionTabs();
         this.setupAlertsTabs();
+        this.setupIssuesTabs();
         this.setupThemeToggle();
         // Print an initialization message to the dashboard console
         try { this.appendConsoleLog('Dashboard initialized'); } catch (e) { /* silent */ }
@@ -482,6 +483,18 @@ class ArchGuardianDashboard {
         
         // Refresh project list to update status
         this.loadProjects();
+        
+        // Reload dashboard data if this is the current project
+        if (this.currentProjectId === projectId) {
+            // Reload all dashboard data to show the new scan results
+            this.loadIssuesData('technical-debt', projectId);
+            this.loadRiskAssessment();
+            this.loadKnowledgeGraph();
+            this.loadCoverageData();
+            
+            // Switch to issues view to show the new results
+            this.switchView('issues');
+        }
     }
 
     async loadInitialData() {
@@ -557,6 +570,9 @@ class ArchGuardianDashboard {
                 <div class="project-status">Status: <span class="status-${(p.status || 'idle').toLowerCase()}">${p.status || 'idle'}</span></div>
                 <div class="project-ingest" data-project-id="${p.id}">Checking ingestion...</div>
                 <div class="project-buttons">
+                    <button class="load-project-btn" data-project-id="${p.id}" data-project-name="${p.name}">
+                        Load
+                    </button>
                     <button class="start-scan-btn" data-project-id="${p.id}" ${p.status === 'scanning' ? 'disabled' : ''}>
                         <span class="btn-spinner" aria-hidden="true"></span>
                         <span class="btn-label">${p.status === 'scanning' ? 'Scanning...' : 'Start'}</span>
@@ -569,6 +585,14 @@ class ArchGuardianDashboard {
         `).join('');
 
         // Attach event listeners for new buttons within the container
+        container.querySelectorAll('.load-project-btn').forEach(btn => {
+            btn.addEventListener('click', (ev) => {
+                const id = btn.dataset.projectId;
+                const name = btn.dataset.projectName;
+                this.loadProject(id, name);
+            });
+        });
+
         container.querySelectorAll('.start-scan-btn').forEach(btn => {
             btn.addEventListener('click', (ev) => {
                 const id = btn.dataset.projectId;
@@ -694,6 +718,45 @@ class ArchGuardianDashboard {
         } catch (error) {
             console.error('Failed to add project:', error);
             this.showNotification(error.message, 'error');
+        }
+    }
+
+    // Load an existing project and display its data
+    async loadProject(projectId, projectName) {
+        try {
+            // Set the current project
+            this.currentProjectId = projectId;
+            this.currentProjectName = projectName;
+
+            // Show project-specific navigation
+            this.showProjectNavigation();
+
+            // Mark project as started
+            this.projectStarted = true;
+            localStorage.setItem('projectStarted', 'true');
+
+            // Update UI to highlight the active project
+            this.updateActiveProjectUI(projectId);
+
+            // Update status label
+            this.updateProjectStatusLabel(projectName, 'Idle', null, null);
+
+            // Load all dashboard data for this project
+            this.loadIssuesData('technical-debt', projectId);
+            this.loadRiskAssessment();
+            this.loadKnowledgeGraph();
+            this.loadCoverageData();
+
+            // Switch to issues view to show the project data
+            this.switchView('issues');
+
+            // Close the modal
+            this.closeProjectsModal();
+
+            this.showNotification(`Loaded project: ${projectName}`, 'success');
+        } catch (error) {
+            console.error('Failed to load project:', error);
+            this.showNotification('Failed to load project: ' + (error.message || error), 'error');
         }
     }
 
@@ -1152,6 +1215,15 @@ class ArchGuardianDashboard {
         const container = document.getElementById('issues-container');
         let html = '';
 
+        // Check if there's a message indicating no scan data
+        if (data.message) {
+            container.innerHTML = `<div class="info-message">
+                <div class="info-icon">ℹ️</div>
+                <div class="info-text">${data.message}</div>
+            </div>`;
+            return;
+        }
+
         switch (type) {
             case 'technical-debt':
                 html = this.renderTechnicalDebt(data.technical_debt || []);
@@ -1558,6 +1630,30 @@ class ArchGuardianDashboard {
 
         // Reload alerts with new filter
         this.loadAlerts();
+    }
+
+    setupIssuesTabs() {
+        const issuesTabs = document.querySelectorAll('.issues-tabs .tab-btn');
+        issuesTabs.forEach(tab => {
+            tab.addEventListener('click', () => {
+                const tabName = tab.dataset.tab;
+                this.switchIssuesTab(tabName);
+            });
+        });
+    }
+
+    switchIssuesTab(tab) {
+        // Remove active class from all tabs
+        document.querySelectorAll('.issues-tabs .tab-btn').forEach(t => t.classList.remove('active'));
+
+        // Add active class to selected tab
+        const selectedTab = document.querySelector(`.issues-tabs [data-tab="${tab}"]`);
+        if (selectedTab) {
+            selectedTab.classList.add('active');
+        }
+
+        // Reload issues with new type
+        this.loadIssuesData(tab, this.currentProjectId || null);
     }
 
     setupModalConnectionTabs() {
@@ -2148,7 +2244,7 @@ style.textContent = `
         margin-top: 1rem;
     }
 
-    .start-scan-btn, .stop-scan-btn {
+    .load-project-btn, .start-scan-btn, .stop-scan-btn {
         flex: 1;
         padding: 0.5rem 1rem;
         border: none;
@@ -2157,6 +2253,15 @@ style.textContent = `
         font-weight: 500;
         cursor: pointer;
         transition: all 0.2s;
+    }
+
+    .load-project-btn {
+        background: #10b981;
+        color: white;
+    }
+
+    .load-project-btn:hover {
+        background: #059669;
     }
 
     .start-scan-btn {
@@ -2449,6 +2554,7 @@ document.head.appendChild(style);
 // Expose thin global wrappers so inline onclick handlers in index.html work reliably.
 // They simply delegate to the dashboard instance.
 window.filterNodes = function(type) { if (window.dashboard && typeof window.dashboard.filterNodes === 'function') window.dashboard.filterNodes(type); };
+window.refreshGraph = function() { if (window.dashboard && typeof window.dashboard.refreshGraph === 'function') window.dashboard.refreshGraph(); };
 window.refreshIssues = function() { if (window.dashboard && typeof window.dashboard.refreshIssues === 'function') window.dashboard.refreshIssues(); };
 window.refreshCoverage = function() { if (window.dashboard && typeof window.dashboard.refreshCoverage === 'function') window.dashboard.refreshCoverage(); };
 window.saveSettings = function() { if (window.dashboard && typeof window.dashboard.saveSettings === 'function') window.dashboard.saveSettings(); };

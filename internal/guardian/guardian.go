@@ -11,7 +11,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"golang.org/x/net/html"
 	"log"
 	"net/url"
 	"os"
@@ -22,8 +21,30 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/net/html"
+
 	"github.com/gorilla/websocket"
 )
+
+// wsConnection wraps a WebSocket connection with a mutex for safe concurrent writes
+type wsConnection struct {
+	conn  *websocket.Conn
+	mutex sync.Mutex
+}
+
+// WriteMessage safely writes a message to the WebSocket connection
+func (wsc *wsConnection) WriteMessage(messageType int, data []byte) error {
+	wsc.mutex.Lock()
+	defer wsc.mutex.Unlock()
+	return wsc.conn.WriteMessage(messageType, data)
+}
+
+// WriteJSON safely writes JSON to the WebSocket connection
+func (wsc *wsConnection) WriteJSON(v interface{}) error {
+	wsc.mutex.Lock()
+	defer wsc.mutex.Unlock()
+	return wsc.conn.WriteJSON(v)
+}
 
 // ArchGuardian is the main orchestration component that coordinates all services
 type ArchGuardian struct {
@@ -33,12 +54,12 @@ type ArchGuardian struct {
 	remediator      *remediation.Remediator
 	baseline        *BaselineChecker
 	dataEngine      *data_engine.DataEngine
-	logWriter       *logWriter        // Real-time log streaming to dashboard
-	triggerScan     chan bool         // Channel to trigger manual scans
-	dashboardConns  []*websocket.Conn // Connected dashboard WebSocket clients
-	connMutex       sync.Mutex        // Mutex for dashboard connections
-	baselineStarted bool              // Whether baseline periodic updates have been started
-	baselineMutex   sync.Mutex        // Protects baselineStarted
+	logWriter       *logWriter      // Real-time log streaming to dashboard
+	triggerScan     chan bool       // Channel to trigger manual scans
+	dashboardConns  []*wsConnection // Connected dashboard WebSocket clients
+	connMutex       sync.Mutex      // Mutex for dashboard connections list
+	baselineStarted bool            // Whether baseline periodic updates have been started
+	baselineMutex   sync.Mutex      // Protects baselineStarted
 }
 
 // BaselineChecker handles web compatibility checking (placeholder for now)
@@ -50,7 +71,7 @@ func NewBaselineChecker(_ context.Context) *BaselineChecker {
 }
 
 // startPeriodicUpdates starts periodic baseline updates (placeholder)
-func (bc *BaselineChecker) startPeriodicUpdates(ctx context.Context) {
+func (bc *BaselineChecker) startPeriodicUpdates() {
 	log.Println("🔄 Baseline periodic updates started (placeholder)")
 }
 
@@ -253,7 +274,7 @@ func (ag *ArchGuardian) Run(ctx context.Context) error {
 	// tests or developer workflows can opt-in to start baseline on init by setting
 	// the START_BASELINE_ON_INIT environment variable to true.
 	if getEnvBool("START_BASELINE_ON_INIT", false) {
-		go ag.baseline.startPeriodicUpdates(ctx)
+		go ag.baseline.startPeriodicUpdates()
 		log.Println("🔄 Baseline periodic updates started at initialization (START_BASELINE_ON_INIT=true).")
 	}
 
@@ -301,7 +322,7 @@ func (ag *ArchGuardian) StartBaselineIfNeeded(ctx context.Context) {
 	}
 
 	if ag.baseline != nil {
-		go ag.baseline.startPeriodicUpdates(ctx)
+		go ag.baseline.startPeriodicUpdates()
 		log.Println("🔄 Baseline periodic updates started on demand.")
 	}
 }
@@ -677,7 +698,8 @@ func (ag *ArchGuardian) produceSystemEvent(eventType data_engine.EventType, subT
 func (ag *ArchGuardian) AddDashboardConnection(conn *websocket.Conn) {
 	ag.connMutex.Lock()
 	defer ag.connMutex.Unlock()
-	ag.dashboardConns = append(ag.dashboardConns, conn)
+	wsConn := &wsConnection{conn: conn}
+	ag.dashboardConns = append(ag.dashboardConns, wsConn)
 	log.Printf("Dashboard client connected. Total clients: %d", len(ag.dashboardConns))
 }
 
@@ -687,7 +709,21 @@ func (ag *ArchGuardian) RemoveDashboardConnection(conn *websocket.Conn) {
 	defer ag.connMutex.Unlock()
 
 	for i, c := range ag.dashboardConns {
-		if c == conn {
+		if c.conn == conn {
+			ag.dashboardConns = append(ag.dashboardConns[:i], ag.dashboardConns[i+1:]...)
+			log.Printf("Dashboard client disconnected. Total clients: %d", len(ag.dashboardConns))
+			break
+		}
+	}
+}
+
+// removeDashboardConnectionByWrapper removes a WebSocket connection by wrapper reference
+func (ag *ArchGuardian) removeDashboardConnectionByWrapper(wsConn *wsConnection) {
+	ag.connMutex.Lock()
+	defer ag.connMutex.Unlock()
+
+	for i, c := range ag.dashboardConns {
+		if c == wsConn {
 			ag.dashboardConns = append(ag.dashboardConns[:i], ag.dashboardConns[i+1:]...)
 			log.Printf("Dashboard client disconnected. Total clients: %d", len(ag.dashboardConns))
 			break
@@ -698,13 +734,17 @@ func (ag *ArchGuardian) RemoveDashboardConnection(conn *websocket.Conn) {
 // BroadcastToDashboard broadcasts a message to all connected dashboard clients
 func (ag *ArchGuardian) BroadcastToDashboard(message string) {
 	ag.connMutex.Lock()
-	defer ag.connMutex.Unlock()
+	// Create a copy of connections to avoid holding lock during writes
+	conns := make([]*wsConnection, len(ag.dashboardConns))
+	copy(conns, ag.dashboardConns)
+	ag.connMutex.Unlock()
 
-	for _, conn := range ag.dashboardConns {
+	// Write to connections without holding the list mutex
+	for _, conn := range conns {
 		if err := conn.WriteMessage(websocket.TextMessage, []byte(message)); err != nil {
 			log.Printf("Failed to send message to dashboard client: %v", err)
 			// Remove broken connection
-			go ag.RemoveDashboardConnection(conn)
+			go ag.removeDashboardConnectionByWrapper(conn)
 		}
 	}
 }
@@ -731,13 +771,17 @@ func (ag *ArchGuardian) sendProgressUpdate(phase string, progress float64, messa
 
 	// Broadcast to all connected clients
 	ag.connMutex.Lock()
-	defer ag.connMutex.Unlock()
+	// Create a copy of connections to avoid holding lock during writes
+	conns := make([]*wsConnection, len(ag.dashboardConns))
+	copy(conns, ag.dashboardConns)
+	ag.connMutex.Unlock()
 
-	for _, conn := range ag.dashboardConns {
+	// Write to connections without holding the list mutex
+	for _, conn := range conns {
 		if err := conn.WriteJSON(wsMessage); err != nil {
 			log.Printf("Failed to send progress update to dashboard client: %v", err)
 			// Remove broken connection
-			go ag.RemoveDashboardConnection(conn)
+			go ag.removeDashboardConnectionByWrapper(conn)
 		}
 	}
 }
@@ -775,15 +819,15 @@ func (ag *ArchGuardian) TriggerScan() {
 // GetStatus returns the current status of ArchGuardian
 func (ag *ArchGuardian) GetStatus() map[string]interface{} {
 	return map[string]interface{}{
-		"running":         true,
-		"project_path":    ag.config.ProjectPath,
-		"scan_interval":   ag.config.ScanInterval.String(),
-		"last_scan":       ag.scanner.GetKnowledgeGraph().LastUpdated,
-		"node_count":      len(ag.scanner.GetKnowledgeGraph().Nodes),
-		"edge_count":      len(ag.scanner.GetKnowledgeGraph().Edges),
-		"dashboard_clients": len(ag.dashboardConns),
+		"running":             true,
+		"project_path":        ag.config.ProjectPath,
+		"scan_interval":       ag.config.ScanInterval.String(),
+		"last_scan":           ag.scanner.GetKnowledgeGraph().LastUpdated,
+		"node_count":          len(ag.scanner.GetKnowledgeGraph().Nodes),
+		"edge_count":          len(ag.scanner.GetKnowledgeGraph().Edges),
+		"dashboard_clients":   len(ag.dashboardConns),
 		"data_engine_enabled": ag.dataEngine != nil,
-		"baseline_started": ag.baselineStarted,
+		"baseline_started":    ag.baselineStarted,
 	}
 }
 

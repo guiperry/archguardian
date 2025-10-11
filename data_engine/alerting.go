@@ -297,6 +297,26 @@ func (a *AlertingSystem) ResolveAlert(alertID string) bool {
 	return false
 }
 
+// ClearResolvedAlerts removes all resolved alerts from the system
+func (a *AlertingSystem) ClearResolvedAlerts() int {
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+
+	var activeAlerts []Alert
+	clearedCount := 0
+
+	for _, alert := range a.alerts {
+		if !alert.Resolved {
+			activeAlerts = append(activeAlerts, alert)
+		} else {
+			clearedCount++
+		}
+	}
+
+	a.alerts = activeAlerts
+	return clearedCount
+}
+
 // Close closes the alerting system
 func (a *AlertingSystem) Close() {
 	a.cancel()

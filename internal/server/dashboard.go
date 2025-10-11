@@ -12,6 +12,7 @@ import (
 // Enhanced handlers that integrate with ArchGuardian when available
 
 // handleKnowledgeGraphWithGuardian returns knowledge graph data from ArchGuardian
+//
 //nolint:unused // This function is used internally by enhanced handlers when guardian is available
 func handleKnowledgeGraphWithGuardian(w http.ResponseWriter, r *http.Request, guardian *ArchGuardian) {
 	w.Header().Set("Content-Type", "application/json")
@@ -27,11 +28,11 @@ func handleKnowledgeGraphWithGuardian(w http.ResponseWriter, r *http.Request, gu
 	graphData := graph.ToAPIFormat()
 
 	response := map[string]interface{}{
-		"nodes":       graphData["nodes"],
-		"edges":       graphData["edges"],
-		"nodeCount":   len(graph.Nodes),
-		"edgeCount":   len(graph.Edges),
-		"lastUpdated": graph.LastUpdated.Format(time.RFC3339),
+		"nodes":         graphData["nodes"],
+		"edges":         graphData["edges"],
+		"nodeCount":     len(graph.Nodes),
+		"edgeCount":     len(graph.Edges),
+		"lastUpdated":   graph.LastUpdated.Format(time.RFC3339),
 		"analysisDepth": graph.AnalysisDepth,
 	}
 
@@ -40,6 +41,7 @@ func handleKnowledgeGraphWithGuardian(w http.ResponseWriter, r *http.Request, gu
 }
 
 // handleRiskAssessmentWithGuardian returns risk assessment data from ArchGuardian
+//
 //nolint:unused // This function is used internally by enhanced handlers when guardian is available
 func handleRiskAssessmentWithGuardian(w http.ResponseWriter, r *http.Request, guardian *ArchGuardian) {
 	w.Header().Set("Content-Type", "application/json")
@@ -50,18 +52,35 @@ func handleRiskAssessmentWithGuardian(w http.ResponseWriter, r *http.Request, gu
 		return
 	}
 
-	// In a real implementation, this would get the latest assessment from the diagnoser
-	// For now, return placeholder with guardian status
+	// Get the latest assessment from the diagnoser
+	latestAssessment := guardian.Guardian.GetDiagnoser().GetLatestAssessment()
+
+	// If no assessment yet, return placeholder
+	if latestAssessment == nil {
+		assessment := map[string]interface{}{
+			"overall_score":          0.0,
+			"technical_debt":         []map[string]interface{}{},
+			"security_vulns":         []map[string]interface{}{},
+			"obsolete_code":          []map[string]interface{}{},
+			"dangerous_dependencies": []map[string]interface{}{},
+			"compatibility_issues":   []map[string]interface{}{},
+			"timestamp":              time.Now().Format(time.RFC3339),
+			"message":                "No scan results available yet. Please run a scan first.",
+		}
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(assessment)
+		return
+	}
+
+	// Convert assessment to API format with snake_case for frontend compatibility
 	assessment := map[string]interface{}{
-		"overallScore":         0.0,
-		"technicalDebt":        []map[string]interface{}{},
-		"securityVulns":        []map[string]interface{}{},
-		"obsoleteCode":         []map[string]interface{}{},
-		"dangerousDependencies": []map[string]interface{}{},
-		"compatibilityIssues":  []map[string]interface{}{},
-		"timestamp":           time.Now().Format(time.RFC3339),
-		"guardian_status":     guardian.Guardian.GetStatus(),
-		"message":            "Risk assessment data will be available after running a scan",
+		"overall_score":          latestAssessment.OverallScore,
+		"technical_debt":         latestAssessment.TechnicalDebt,
+		"security_vulns":         latestAssessment.SecurityVulns,
+		"obsolete_code":          latestAssessment.ObsoleteCode,
+		"dangerous_dependencies": latestAssessment.DangerousDependencies,
+		"compatibility_issues":   latestAssessment.CompatibilityIssues,
+		"timestamp":              latestAssessment.Timestamp.Format(time.RFC3339),
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -85,10 +104,10 @@ func handleTriggerScan(w http.ResponseWriter, r *http.Request, guardian *ArchGua
 	guardian.Guardian.TriggerScan()
 
 	response := map[string]interface{}{
-		"success":     true,
-		"message":     "Scan triggered successfully",
-		"timestamp":   time.Now().Format(time.RFC3339),
-		"status":      guardian.Guardian.GetStatus(),
+		"success":   true,
+		"message":   "Scan triggered successfully",
+		"timestamp": time.Now().Format(time.RFC3339),
+		"status":    guardian.Guardian.GetStatus(),
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -137,7 +156,6 @@ func handleEnhancedKnowledgeGraph(w http.ResponseWriter, r *http.Request, guardi
 	}
 }
 
-
 func handleEnhancedRiskAssessment(w http.ResponseWriter, r *http.Request, guardian *ArchGuardian) {
 	// Enhanced risk assessment with additional filtering
 	log.Printf("📊 Enhanced risk assessment request from %s", r.RemoteAddr)
@@ -154,9 +172,12 @@ func handleEnhancedRiskAssessment(w http.ResponseWriter, r *http.Request, guardi
 	}
 }
 
-func handleEnhancedIssues(w http.ResponseWriter, r *http.Request, _ *ArchGuardian) {
+func handleEnhancedIssues(w http.ResponseWriter, r *http.Request, guardian *ArchGuardian) {
 	// Enhanced issues handler with filtering and pagination
 	log.Printf("📊 Enhanced issues request from %s", r.RemoteAddr)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	// Validate and extract parameters
 	limit, offset := getPaginationParams(r)
@@ -164,9 +185,197 @@ func handleEnhancedIssues(w http.ResponseWriter, r *http.Request, _ *ArchGuardia
 
 	log.Printf("📊 Enhanced issues: limit=%d, offset=%d, filters=%v", limit, offset, filters)
 
-	// This would be called from the main server with access to ArchGuardian
-	// For now, just call the basic handler
-	handleIssues(w, r)
+	// If guardian is not available, return empty data
+	if guardian == nil || guardian.Guardian == nil {
+		handleIssues(w, r)
+		return
+	}
+
+	// Get the latest risk assessment
+	assessment := guardian.Guardian.GetDiagnoser().GetLatestAssessment()
+
+	// If no assessment yet, return empty
+	if assessment == nil {
+		response := map[string]interface{}{
+			"technical_debt":         []map[string]interface{}{},
+			"security_vulns":         []map[string]interface{}{},
+			"dangerous_dependencies": []map[string]interface{}{},
+			"compatibility_issues":   []map[string]interface{}{},
+			"obsolete_code":          []map[string]interface{}{},
+			"message":                "No scan results available yet. Please run a scan first.",
+		}
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	// Collect issues by type
+	technicalDebtIssues := make([]map[string]interface{}, 0)
+	securityIssues := make([]map[string]interface{}, 0)
+	dependencyIssues := make([]map[string]interface{}, 0)
+	compatibilityIssues := make([]map[string]interface{}, 0)
+	obsoleteCodeIssues := make([]map[string]interface{}, 0)
+
+	// Add technical debt items
+	for i, item := range assessment.TechnicalDebt {
+		issue := map[string]interface{}{
+			"id":          fmt.Sprintf("TD-%d", i+1),
+			"type":        "technical_debt",
+			"category":    item.Type,
+			"name":        item.Type,
+			"location":    item.Location,
+			"severity":    item.Severity,
+			"description": item.Description,
+			"remediation": item.Remediation,
+			"effort":      item.Effort,
+			"timestamp":   assessment.Timestamp.Format(time.RFC3339),
+		}
+		if shouldIncludeIssue(issue, filters) {
+			technicalDebtIssues = append(technicalDebtIssues, issue)
+		}
+	}
+
+	// Add security vulnerabilities
+	for i, vuln := range assessment.SecurityVulns {
+		issue := map[string]interface{}{
+			"id":          fmt.Sprintf("SEC-%d", i+1),
+			"type":        "security",
+			"category":    "vulnerability",
+			"name":        vuln.CVE,
+			"location":    fmt.Sprintf("%s@%s", vuln.Package, vuln.Version),
+			"severity":    vuln.Severity,
+			"description": vuln.Description,
+			"remediation": fmt.Sprintf("Upgrade to %s", vuln.FixVersion),
+			"cvss":        vuln.CVSS,
+			"timestamp":   assessment.Timestamp.Format(time.RFC3339),
+		}
+		if shouldIncludeIssue(issue, filters) {
+			securityIssues = append(securityIssues, issue)
+		}
+	}
+
+	// Add obsolete code items
+	for i, item := range assessment.ObsoleteCode {
+		issue := map[string]interface{}{
+			"id":          fmt.Sprintf("OBS-%d", i+1),
+			"type":        "obsolete",
+			"category":    "deprecated",
+			"name":        item.Path,
+			"location":    item.Path,
+			"severity":    item.RemovalSafety,
+			"description": fmt.Sprintf("Obsolete code with %d references. Last used: %s", item.References, item.LastUsed.Format("2006-01-02")),
+			"remediation": item.RecommendAction,
+			"references":  item.References,
+			"timestamp":   assessment.Timestamp.Format(time.RFC3339),
+		}
+		if shouldIncludeIssue(issue, filters) {
+			obsoleteCodeIssues = append(obsoleteCodeIssues, issue)
+		}
+	}
+
+	// Add dangerous dependencies
+	for i, dep := range assessment.DangerousDependencies {
+		severity := "medium"
+		if dep.SecurityIssues > 0 {
+			severity = "high"
+		}
+		if dep.Maintenance == "abandoned" {
+			severity = "critical"
+		}
+
+		issue := map[string]interface{}{
+			"id":             fmt.Sprintf("DEP-%d", i+1),
+			"type":           "dependency",
+			"category":       "dangerous",
+			"name":           dep.Package,
+			"location":       fmt.Sprintf("%s@%s", dep.Package, dep.CurrentVersion),
+			"severity":       severity,
+			"description":    fmt.Sprintf("Dependency risk: %s (maintenance: %s, security issues: %d)", dep.Package, dep.Maintenance, dep.SecurityIssues),
+			"remediation":    dep.Recommendation,
+			"currentVersion": dep.CurrentVersion,
+			"latestVersion":  dep.LatestVersion,
+			"securityIssues": dep.SecurityIssues,
+			"maintenance":    dep.Maintenance,
+			"timestamp":      assessment.Timestamp.Format(time.RFC3339),
+		}
+		if shouldIncludeIssue(issue, filters) {
+			dependencyIssues = append(dependencyIssues, issue)
+		}
+	}
+
+	// Add compatibility issues
+	for i, item := range assessment.CompatibilityIssues {
+		issue := map[string]interface{}{
+			"id":          fmt.Sprintf("COMPAT-%d", i+1),
+			"type":        "compatibility",
+			"category":    item.Type,
+			"name":        item.Type,
+			"location":    item.Location,
+			"severity":    item.Severity,
+			"description": item.Description,
+			"remediation": item.Remediation,
+			"timestamp":   assessment.Timestamp.Format(time.RFC3339),
+		}
+		if shouldIncludeIssue(issue, filters) {
+			compatibilityIssues = append(compatibilityIssues, issue)
+		}
+	}
+
+	log.Printf("📊 Returning issues: %d technical debt, %d security, %d dependencies, %d compatibility, %d obsolete",
+		len(technicalDebtIssues), len(securityIssues), len(dependencyIssues), len(compatibilityIssues), len(obsoleteCodeIssues))
+
+	// Return issues grouped by type for frontend compatibility
+	response := map[string]interface{}{
+		"technical_debt":         technicalDebtIssues,
+		"security_vulns":         securityIssues,
+		"dangerous_dependencies": dependencyIssues,
+		"compatibility_issues":   compatibilityIssues,
+		"obsolete_code":          obsoleteCodeIssues,
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
+}
+
+// shouldIncludeIssue checks if an issue matches the given filters
+func shouldIncludeIssue(issue map[string]interface{}, filters map[string]string) bool {
+	// If no filters, include all
+	if len(filters) == 0 {
+		return true
+	}
+
+	// Check severity filter
+	if severity, ok := filters["severity"]; ok {
+		if issueSeverity, ok := issue["severity"].(string); ok {
+			if issueSeverity != severity {
+				return false
+			}
+		}
+	}
+
+	// Check category filter (type)
+	if category, ok := filters["category"]; ok {
+		if issueType, ok := issue["type"].(string); ok {
+			if issueType != category {
+				return false
+			}
+		}
+	}
+
+	// Check since filter (timestamp)
+	if since, ok := filters["since"]; ok {
+		if timestamp, ok := issue["timestamp"].(string); ok {
+			sinceTime, err1 := time.Parse(time.RFC3339, since)
+			issueTime, err2 := time.Parse(time.RFC3339, timestamp)
+			if err1 == nil && err2 == nil {
+				if issueTime.Before(sinceTime) {
+					return false
+				}
+			}
+		}
+	}
+
+	return true
 }
 
 func handleEnhancedCoverage(w http.ResponseWriter, r *http.Request, _ *ArchGuardian) {
@@ -253,8 +462,8 @@ func validateDashboardRequest(r *http.Request) error {
 
 // getPaginationParams extracts pagination parameters from request
 func getPaginationParams(r *http.Request) (limit, offset int) {
-	limit = 50  // default
-	offset = 0  // default
+	limit = 50 // default
+	offset = 0 // default
 
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
 		if parsedLimit, err := strconv.Atoi(limitStr); err == nil && parsedLimit > 0 && parsedLimit <= 1000 {

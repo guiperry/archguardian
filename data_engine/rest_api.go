@@ -142,7 +142,8 @@ func (s *RESTAPIServer) setupRoutes() {
 
 	// Alerts
 	api.HandleFunc("/alerts", s.handleGetAlerts).Methods("GET")
-	api.HandleFunc("/alerts/{id}", s.handleResolveAlert).Methods("PUT")
+	api.HandleFunc("/alerts/clear-resolved", s.handleClearResolvedAlerts).Methods("POST")
+	api.HandleFunc("/alerts/{id}/resolve", s.handleResolveAlert).Methods("POST")
 
 	// Events
 	api.HandleFunc("/events", s.handleGetEvents).Methods("GET")
@@ -277,7 +278,9 @@ func (s *RESTAPIServer) handleGetAlerts(w http.ResponseWriter, r *http.Request) 
 	// If alerting subsystem is not available, return empty list (200) to keep API consumer-friendly
 	if s.dataEngine == nil || s.dataEngine.alerting == nil {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode([]Alert{})
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"alerts": []Alert{},
+		})
 		return
 	}
 
@@ -295,7 +298,9 @@ func (s *RESTAPIServer) handleGetAlerts(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "application/json")
 
 	// Write response
-	json.NewEncoder(w).Encode(alerts)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"alerts": alerts,
+	})
 }
 
 // handleResolveAlert handles requests to resolve an alert
@@ -319,6 +324,26 @@ func (s *RESTAPIServer) handleResolveAlert(w http.ResponseWriter, r *http.Reques
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"id":       alertID,
 		"resolved": resolved,
+	})
+}
+
+// handleClearResolvedAlerts handles requests to clear all resolved alerts
+func (s *RESTAPIServer) handleClearResolvedAlerts(w http.ResponseWriter, r *http.Request) {
+	if s.dataEngine == nil || s.dataEngine.alerting == nil {
+		http.Error(w, "Alerting system not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Clear resolved alerts
+	clearedCount := s.dataEngine.alerting.ClearResolvedAlerts()
+
+	// Set content type
+	w.Header().Set("Content-Type", "application/json")
+
+	// Write response
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"cleared": clearedCount,
 	})
 }
 
