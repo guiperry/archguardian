@@ -63,10 +63,7 @@ type ArchGuardian struct {
 	connMutex       sync.Mutex      // Mutex for dashboard connections list
 	baselineStarted bool            // Whether baseline periodic updates have been started
 	baselineMutex   sync.Mutex      // Protects baselineStarted
-<<<<<<< Updated upstream
-=======
 	projectID       string          // Unique identifier for the current project
->>>>>>> Stashed changes
 }
 
 // BaselineChecker handles web compatibility checking (placeholder for now)
