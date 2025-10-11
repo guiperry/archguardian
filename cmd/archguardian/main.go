@@ -145,7 +145,7 @@ func main() {
 	log.Println("✅ AI inference engine initialized successfully")
 
 	// Initialize ArchGuardian core
-	guardianCore := guardian.NewArchGuardian(cfg, aiEngine)
+	guardianCore := guardian.NewArchGuardian(cfg, aiEngine, chromemManager)
 	log.Println("✅ ArchGuardian Core initialized successfully")
 
 	// Initialize Scan Manager
@@ -215,7 +215,6 @@ func initializeInferenceEngine(cfg *config.Config) (*inference_engine.InferenceS
 
 	// Configure LLM attempts based on available API keys
 	var attemptConfigs []inference_engine.LLMAttemptConfig
-	var plannerModelName string // Variable to hold the actual planner model name
 
 	// Add Cerebras as primary if configured
 	if cfg.AIProviders.Cerebras.APIKey != "" {
@@ -229,12 +228,11 @@ func initializeInferenceEngine(cfg *config.Config) (*inference_engine.InferenceS
 		log.Println("✅ Cerebras provider configured")
 	}
 
-	// Add Gemini as primary if configured
+	// Add Gemini as fallback if configured
 	if cfg.AIProviders.Gemini.APIKey != "" {
-		plannerModelName = cfg.AIProviders.Gemini.Model // Capture the configured model name
 		attemptConfigs = append(attemptConfigs, inference_engine.LLMAttemptConfig{
 			ProviderName: "gemini",
-			ModelName:    plannerModelName,
+			ModelName:    cfg.AIProviders.Gemini.Model,
 			APIKeyEnvVar: "GEMINI_API_KEY",
 			MaxTokens:    32000,
 			IsPrimary:    false, // Powerful models like Gemini Pro are better as fallbacks or for specific tasks
@@ -282,18 +280,13 @@ func initializeInferenceEngine(cfg *config.Config) (*inference_engine.InferenceS
 		return nil, fmt.Errorf("no AI providers configured. Please set at least one API key")
 	}
 
-	// If no specific planner model was configured via Gemini, default to the one in the orchestrator config.
-	if plannerModelName == "" {
-		plannerModelName = cfg.Orchestrator.PlannerModel
-	}
-
-	// Start the inference service with configured models
+	// Start the inference service with configured models from orchestrator config
 	err = aiEngine.StartWithConfig(
 		attemptConfigs,
-		plannerModelName, // Use the dynamically captured planner model name
-		cfg.Orchestrator.ExecutorModels,
-		cfg.Orchestrator.FinalizerModel,
-		cfg.Orchestrator.VerifierModel,
+		cfg.Orchestrator.PlannerModel,   // Use orchestrator planner model from env
+		cfg.Orchestrator.ExecutorModels, // Use orchestrator executor models from env
+		cfg.Orchestrator.FinalizerModel, // Use orchestrator finalizer model from env
+		cfg.Orchestrator.VerifierModel,  // Use orchestrator verifier model from env
 	)
 	if err != nil {
 		return nil, err

@@ -23,8 +23,27 @@ func handleKnowledgeGraphWithGuardian(w http.ResponseWriter, r *http.Request, gu
 		return
 	}
 
-	// Get knowledge graph from scanner
+	// Try to get knowledge graph from scanner (in-memory)
 	graph := guardian.Guardian.GetScanner().GetKnowledgeGraph()
+
+	// If no nodes in memory, try loading from database
+	if len(graph.Nodes) == 0 {
+		log.Println("📊 No knowledge graph in memory, attempting to load from database...")
+		if chromemManager := guardian.Guardian.GetChromemManager(); chromemManager != nil {
+			nodes, err := chromemManager.GetAllNodes()
+			if err != nil {
+				log.Printf("⚠️  Failed to load nodes from database: %v", err)
+			} else if len(nodes) > 0 {
+				log.Printf("✅ Loaded %d nodes from database", len(nodes))
+				// Reconstruct the graph from database nodes
+				for _, node := range nodes {
+					graph.Nodes[node.ID] = node
+				}
+				graph.LastUpdated = time.Now()
+			}
+		}
+	}
+
 	graphData := graph.ToAPIFormat()
 
 	response := map[string]interface{}{
@@ -52,10 +71,25 @@ func handleRiskAssessmentWithGuardian(w http.ResponseWriter, r *http.Request, gu
 		return
 	}
 
-	// Get the latest assessment from the diagnoser
+	// Get the latest assessment from the diagnoser (in-memory)
 	latestAssessment := guardian.Guardian.GetDiagnoser().GetLatestAssessment()
 
-	// If no assessment yet, return placeholder
+	// If no assessment in memory, try loading from database
+	if latestAssessment == nil {
+		log.Println("📊 No risk assessment in memory, attempting to load from database...")
+		if chromemManager := guardian.Guardian.GetChromemManager(); chromemManager != nil {
+			dbAssessment, err := chromemManager.GetLatestRiskAssessment()
+			if err != nil {
+				log.Printf("⚠️  Failed to load risk assessment from database: %v", err)
+			} else if dbAssessment != nil {
+				log.Printf("✅ Loaded risk assessment from database (timestamp: %s, score: %.2f)",
+					dbAssessment.Timestamp.Format(time.RFC3339), dbAssessment.OverallScore)
+				latestAssessment = dbAssessment
+			}
+		}
+	}
+
+	// If still no assessment, return placeholder
 	if latestAssessment == nil {
 		assessment := map[string]interface{}{
 			"overall_score":          0.0,
@@ -191,10 +225,24 @@ func handleEnhancedIssues(w http.ResponseWriter, r *http.Request, guardian *Arch
 		return
 	}
 
-	// Get the latest risk assessment
+	// Get the latest risk assessment (in-memory first)
 	assessment := guardian.Guardian.GetDiagnoser().GetLatestAssessment()
 
-	// If no assessment yet, return empty
+	// If no assessment in memory, try loading from database
+	if assessment == nil {
+		log.Println("📊 No risk assessment in memory for issues, attempting to load from database...")
+		if chromemManager := guardian.Guardian.GetChromemManager(); chromemManager != nil {
+			dbAssessment, err := chromemManager.GetLatestRiskAssessment()
+			if err != nil {
+				log.Printf("⚠️  Failed to load risk assessment from database: %v", err)
+			} else if dbAssessment != nil {
+				log.Printf("✅ Loaded risk assessment from database for issues display")
+				assessment = dbAssessment
+			}
+		}
+	}
+
+	// If still no assessment, return empty
 	if assessment == nil {
 		response := map[string]interface{}{
 			"technical_debt":         []map[string]interface{}{},

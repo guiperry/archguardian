@@ -19,7 +19,7 @@ import (
 type Remediator struct {
 	config    *config.Config
 	diagnoser *risk.RiskDiagnoser
-	ai        interface{} // TODO: Use proper AI inference engine type
+	ai        types.AIEngineInterface // AI inference engine for generating fixes
 	git       *GitManager
 }
 
@@ -29,11 +29,11 @@ type GitManager struct {
 }
 
 // NewRemediator creates a new remediator
-func NewRemediator(config *config.Config, diagnoser *risk.RiskDiagnoser) *Remediator {
+func NewRemediator(config *config.Config, diagnoser *risk.RiskDiagnoser, aiEngine types.AIEngineInterface) *Remediator {
 	return &Remediator{
 		config:    config,
 		diagnoser: diagnoser,
-		ai:        diagnoser, // TODO: Use proper AI engine
+		ai:        aiEngine,
 		git:       NewGitManager(config),
 	}
 }

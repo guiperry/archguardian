@@ -32,7 +32,7 @@ import (
 // wsConnection wraps a WebSocket connection with a mutex for safe concurrent writes
 type wsConnection struct {
 	conn  *websocket.Conn
-	mutex sync.Mutex
+	mutex *sync.Mutex
 }
 
 // WriteMessage safely writes a message to the WebSocket connection
@@ -57,13 +57,14 @@ type ArchGuardian struct {
 	remediator      *remediation.Remediator
 	baseline        *BaselineChecker
 	dataEngine      *data_engine.DataEngine
-	logWriter       *logWriter      // Real-time log streaming to dashboard
-	triggerScan     chan bool       // Channel to trigger manual scans
-	dashboardConns  []*wsConnection // Connected dashboard WebSocket clients
-	connMutex       sync.Mutex      // Mutex for dashboard connections list
-	baselineStarted bool            // Whether baseline periodic updates have been started
-	baselineMutex   sync.Mutex      // Protects baselineStarted
-	projectID       string          // Unique identifier for the current project
+	chromemManager  *data_engine.ChromemManager // Persistent storage for knowledge graph and risks
+	logWriter       *logWriter                  // Real-time log streaming to dashboard
+	triggerScan     chan bool                   // Channel to trigger manual scans
+	dashboardConns  []*wsConnection             // Connected dashboard WebSocket clients
+	connMutex       sync.Mutex                  // Mutex for dashboard connections list
+	baselineStarted bool                        // Whether baseline periodic updates have been started
+	baselineMutex   sync.Mutex                  // Protects baselineStarted
+	projectID       string                      // Unique identifier for the current project
 }
 
 // BaselineChecker handles web compatibility checking (placeholder for now)
@@ -191,7 +192,7 @@ func createWebSocketMessage(msgType string, data interface{}) map[string]interfa
 }
 
 // NewArchGuardian creates a new ArchGuardian instance with all dependencies
-func NewArchGuardian(config *config.Config, aiEngine *inference_engine.InferenceService) *ArchGuardian {
+func NewArchGuardian(config *config.Config, aiEngine *inference_engine.InferenceService, chromemManager *data_engine.ChromemManager) *ArchGuardian {
 	log.Println("🚀 Initializing ArchGuardian Core...")
 
 	// Initialize data engine if enabled
@@ -226,11 +227,11 @@ func NewArchGuardian(config *config.Config, aiEngine *inference_engine.Inference
 	log.Println("✅ Scanner initialized successfully")
 
 	// Initialize risk diagnoser
-	diagnoser := risk.NewRiskDiagnoser(scannerInstance, aiEngine)
+	diagnoser := risk.NewRiskDiagnoser(scannerInstance, aiEngine, nil) // TODO: Pass proper Codacy client when implemented
 	log.Println("✅ Risk diagnoser initialized successfully")
 
 	// Initialize remediator
-	remediatorInstance := remediation.NewRemediator(config, diagnoser)
+	remediatorInstance := remediation.NewRemediator(config, diagnoser, aiEngine)
 	log.Println("✅ Remediator initialized successfully")
 
 	// Generate project ID from project path
@@ -238,14 +239,15 @@ func NewArchGuardian(config *config.Config, aiEngine *inference_engine.Inference
 	log.Printf("📋 Project ID: %s", projectID)
 
 	guardian := &ArchGuardian{
-		config:      config,
-		scanner:     scannerInstance,
-		diagnoser:   diagnoser,
-		remediator:  remediatorInstance,
-		baseline:    NewBaselineChecker(context.Background()),
-		dataEngine:  de,
-		triggerScan: make(chan bool), // Initialize the channel
-		projectID:   projectID,
+		config:         config,
+		scanner:        scannerInstance,
+		diagnoser:      diagnoser,
+		remediator:     remediatorInstance,
+		baseline:       NewBaselineChecker(context.Background()),
+		dataEngine:     de,
+		chromemManager: chromemManager,
+		triggerScan:    make(chan bool), // Initialize the channel
+		projectID:      projectID,
 	}
 
 	// Initialize and activate logWriter for real-time log streaming to dashboard
@@ -698,8 +700,28 @@ func (ag *ArchGuardian) exportKnowledgeGraph() error {
 
 	log.Printf("📊 Knowledge graph exported to: %s", outputPath)
 
-	// TODO: Also persist to chromem database for structured querying
-	// This would involve calling dataEngine.StoreKnowledgeGraph() if available
+	// Persist knowledge graph nodes to chromem database for structured querying and vector search
+	if ag.chromemManager != nil {
+		kg := ag.scanner.GetKnowledgeGraph()
+		nodeCount := 0
+		errorCount := 0
+
+		for _, node := range kg.Nodes {
+			if err := ag.chromemManager.UpsertNode(node); err != nil {
+				log.Printf("⚠️  Failed to persist node %s to chromem database: %v", node.ID, err)
+				errorCount++
+			} else {
+				nodeCount++
+			}
+		}
+
+		if errorCount > 0 {
+			log.Printf("⚠️  Persisted %d/%d knowledge graph nodes to chromem database (%d errors)",
+				nodeCount, len(kg.Nodes), errorCount)
+		} else {
+			log.Printf("✅ Persisted %d knowledge graph nodes to chromem database", nodeCount)
+		}
+	}
 
 	return nil
 }
@@ -726,8 +748,15 @@ func (ag *ArchGuardian) exportRiskAssessment(assessment *types.RiskAssessment) e
 
 	log.Printf("📊 Risk assessment exported to: %s", outputPath)
 
-	// TODO: Also persist to chromem database for structured querying
-	// This would involve calling dataEngine.StoreRiskAssessment() if available
+	// Persist to chromem database for structured querying and vector search
+	if ag.chromemManager != nil {
+		if err := ag.chromemManager.StoreRiskAssessment(assessment); err != nil {
+			log.Printf("⚠️  Failed to persist risk assessment to chromem database: %v", err)
+			// Don't fail the entire operation if database persistence fails
+		} else {
+			log.Println("✅ Risk assessment persisted to chromem database")
+		}
+	}
 
 	return nil
 }
@@ -759,7 +788,7 @@ func (ag *ArchGuardian) produceSystemEvent(eventType data_engine.EventType, subT
 func (ag *ArchGuardian) AddDashboardConnection(conn *websocket.Conn) {
 	ag.connMutex.Lock()
 	defer ag.connMutex.Unlock()
-	wsConn := &wsConnection{conn: conn}
+	wsConn := &wsConnection{conn: conn, mutex: &sync.Mutex{}}
 	ag.dashboardConns = append(ag.dashboardConns, wsConn)
 	log.Printf("Dashboard client connected. Total clients: %d", len(ag.dashboardConns))
 }
@@ -873,6 +902,11 @@ func (ag *ArchGuardian) GetRemediator() *remediation.Remediator {
 // GetDataEngine returns the data engine instance
 func (ag *ArchGuardian) GetDataEngine() *data_engine.DataEngine {
 	return ag.dataEngine
+}
+
+// GetChromemManager returns the chromem manager instance
+func (ag *ArchGuardian) GetChromemManager() *data_engine.ChromemManager {
+	return ag.chromemManager
 }
 
 // TriggerScan triggers a manual scan

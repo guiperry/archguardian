@@ -190,7 +190,69 @@ func (m *ChromemManager) StoreRiskAssessment(assessment *types.RiskAssessment) e
 		metadatas = append(metadatas, stringifyMetadata(metadata))
 	}
 
-	// Add other risk types (ObsoleteCode, DangerousDependencies) similarly...
+	// Process Obsolete Code
+	for i, item := range assessment.ObsoleteCode {
+		docID := fmt.Sprintf("obs-%d-%d", i, assessment.Timestamp.Unix())
+		content := fmt.Sprintf("Obsolete code at %s. Last used: %s. References: %d. Recommended action: %s",
+			item.Path, item.LastUsed.Format("2006-01-02"), item.References, item.RecommendAction)
+		itemJSON, _ := json.Marshal(item)
+		metadata := map[string]interface{}{
+			"id":            docID,
+			"risk_type":     "obsolete_code",
+			"path":          item.Path,
+			"severity":      item.RemovalSafety,
+			"assessment_ts": ts,
+			"risk_data":     string(itemJSON),
+		}
+		ids = append(ids, docID)
+		documents = append(documents, content)
+		metadatas = append(metadatas, stringifyMetadata(metadata))
+	}
+
+	// Process Dangerous Dependencies
+	for _, item := range assessment.DangerousDependencies {
+		docID := fmt.Sprintf("dep-%s-%d", item.Package, assessment.Timestamp.Unix())
+		severity := "medium"
+		if item.SecurityIssues > 0 {
+			severity = "high"
+		}
+		if item.Maintenance == "abandoned" {
+			severity = "critical"
+		}
+		content := fmt.Sprintf("Dangerous dependency: %s (current: %s, latest: %s). Maintenance: %s. Security issues: %d. Recommendation: %s",
+			item.Package, item.CurrentVersion, item.LatestVersion, item.Maintenance, item.SecurityIssues, item.Recommendation)
+		itemJSON, _ := json.Marshal(item)
+		metadata := map[string]interface{}{
+			"id":            docID,
+			"risk_type":     "dependency",
+			"package":       item.Package,
+			"severity":      severity,
+			"assessment_ts": ts,
+			"risk_data":     string(itemJSON),
+		}
+		ids = append(ids, docID)
+		documents = append(documents, content)
+		metadatas = append(metadatas, stringifyMetadata(metadata))
+	}
+
+	// Process Compatibility Issues
+	for i, item := range assessment.CompatibilityIssues {
+		docID := fmt.Sprintf("compat-%d-%d", i, assessment.Timestamp.Unix())
+		content := fmt.Sprintf("Compatibility issue: %s. Severity: %s. Location: %s. Description: %s",
+			item.Type, item.Severity, item.Location, item.Description)
+		itemJSON, _ := json.Marshal(item)
+		metadata := map[string]interface{}{
+			"id":            docID,
+			"risk_type":     "compatibility",
+			"severity":      item.Severity,
+			"location":      item.Location,
+			"assessment_ts": ts,
+			"risk_data":     string(itemJSON),
+		}
+		ids = append(ids, docID)
+		documents = append(documents, content)
+		metadatas = append(metadatas, stringifyMetadata(metadata))
+	}
 
 	if len(ids) == 0 {
 		return nil // Nothing to store
@@ -240,6 +302,207 @@ func (m *ChromemManager) QueryNodes(query string, limit int) ([]*types.Node, err
 		}
 	}
 	return nodes, nil
+}
+
+// GetAllNodes retrieves all nodes from the database
+func (m *ChromemManager) GetAllNodes() ([]*types.Node, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// Query with empty string to get all nodes, with a high limit
+	results, err := m.nodeCollection.Query(context.Background(), "", 10000, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get all nodes: %w", err)
+	}
+
+	var nodes []*types.Node
+	for _, res := range results {
+		if nodeData, ok := res.Metadata["node_data"]; ok {
+			var node types.Node
+			if err := json.Unmarshal([]byte(nodeData), &node); err == nil {
+				nodes = append(nodes, &node)
+			}
+		}
+	}
+
+	log.Printf("ChromemDB Manager: Retrieved %d nodes from database", len(nodes))
+	return nodes, nil
+}
+
+// GetLatestRiskAssessment retrieves the most recent risk assessment from the database
+func (m *ChromemManager) GetLatestRiskAssessment() (*types.RiskAssessment, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// Query all risk items
+	results, err := m.riskCollection.Query(context.Background(), "", 10000, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query risk assessments: %w", err)
+	}
+
+	if len(results) == 0 {
+		return nil, nil // No risk assessments found
+	}
+
+	// Group risk items by assessment timestamp
+	assessmentMap := make(map[string]*types.RiskAssessment)
+
+	for _, res := range results {
+		assessmentTS, ok := res.Metadata["assessment_ts"]
+		if !ok {
+			continue
+		}
+
+		// Get or create assessment for this timestamp
+		assessment, exists := assessmentMap[assessmentTS]
+		if !exists {
+			ts, err := time.Parse(time.RFC3339, assessmentTS)
+			if err != nil {
+				log.Printf("⚠️  Failed to parse timestamp %s: %v", assessmentTS, err)
+				continue
+			}
+			assessment = &types.RiskAssessment{
+				Timestamp:             ts,
+				TechnicalDebt:         []types.TechnicalDebtItem{},
+				SecurityVulns:         []types.SecurityVulnerability{},
+				ObsoleteCode:          []types.ObsoleteCodeItem{},
+				DangerousDependencies: []types.DependencyRisk{},
+				CompatibilityIssues:   []types.TechnicalDebtItem{},
+			}
+			assessmentMap[assessmentTS] = assessment
+		}
+
+		// Parse the risk data based on type
+		riskType, ok := res.Metadata["risk_type"]
+		if !ok {
+			continue
+		}
+
+		riskData, ok := res.Metadata["risk_data"]
+		if !ok {
+			continue
+		}
+
+		switch riskType {
+		case "technical_debt":
+			var item types.TechnicalDebtItem
+			if err := json.Unmarshal([]byte(riskData), &item); err == nil {
+				assessment.TechnicalDebt = append(assessment.TechnicalDebt, item)
+			}
+		case "security":
+			var item types.SecurityVulnerability
+			if err := json.Unmarshal([]byte(riskData), &item); err == nil {
+				assessment.SecurityVulns = append(assessment.SecurityVulns, item)
+			}
+		case "obsolete_code":
+			var item types.ObsoleteCodeItem
+			if err := json.Unmarshal([]byte(riskData), &item); err == nil {
+				assessment.ObsoleteCode = append(assessment.ObsoleteCode, item)
+			}
+		case "dependency":
+			var item types.DependencyRisk
+			if err := json.Unmarshal([]byte(riskData), &item); err == nil {
+				assessment.DangerousDependencies = append(assessment.DangerousDependencies, item)
+			}
+		case "compatibility":
+			var item types.TechnicalDebtItem
+			if err := json.Unmarshal([]byte(riskData), &item); err == nil {
+				assessment.CompatibilityIssues = append(assessment.CompatibilityIssues, item)
+			}
+		}
+	}
+
+	// Find the most recent assessment
+	var latestAssessment *types.RiskAssessment
+	var latestTime time.Time
+
+	for _, assessment := range assessmentMap {
+		if assessment.Timestamp.After(latestTime) {
+			latestTime = assessment.Timestamp
+			latestAssessment = assessment
+		}
+	}
+
+	if latestAssessment != nil {
+		// Calculate overall score based on the items
+		latestAssessment.OverallScore = calculateOverallScore(latestAssessment)
+		log.Printf("ChromemDB Manager: Retrieved latest risk assessment from %s with score %.2f",
+			latestAssessment.Timestamp.Format(time.RFC3339), latestAssessment.OverallScore)
+	}
+
+	return latestAssessment, nil
+}
+
+// calculateOverallScore calculates the overall risk score from assessment items
+func calculateOverallScore(assessment *types.RiskAssessment) float64 {
+	if assessment == nil {
+		return 0.0
+	}
+
+	totalScore := 0.0
+	itemCount := 0
+
+	// Score technical debt items
+	for _, item := range assessment.TechnicalDebt {
+		score := severityToScore(item.Severity)
+		totalScore += score
+		itemCount++
+	}
+
+	// Score security vulnerabilities (weighted higher)
+	for _, vuln := range assessment.SecurityVulns {
+		score := severityToScore(vuln.Severity) * 1.5 // Security issues weighted 1.5x
+		totalScore += score
+		itemCount++
+	}
+
+	// Score obsolete code
+	for range assessment.ObsoleteCode {
+		totalScore += 30.0 // Medium severity
+		itemCount++
+	}
+
+	// Score dangerous dependencies
+	for _, dep := range assessment.DangerousDependencies {
+		score := 50.0 // Default medium-high
+		if dep.SecurityIssues > 0 {
+			score = 80.0
+		}
+		if dep.Maintenance == "abandoned" {
+			score = 90.0
+		}
+		totalScore += score
+		itemCount++
+	}
+
+	// Score compatibility issues
+	for _, item := range assessment.CompatibilityIssues {
+		score := severityToScore(item.Severity)
+		totalScore += score
+		itemCount++
+	}
+
+	if itemCount == 0 {
+		return 0.0
+	}
+
+	return totalScore / float64(itemCount)
+}
+
+// severityToScore converts severity string to numeric score
+func severityToScore(severity string) float64 {
+	switch severity {
+	case "critical":
+		return 100.0
+	case "high":
+		return 80.0
+	case "medium":
+		return 50.0
+	case "low":
+		return 20.0
+	default:
+		return 30.0
+	}
 }
 
 // createEmbeddingFunction creates an embedding function that calls the CloudFlare worker with fallback

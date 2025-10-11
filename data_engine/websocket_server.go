@@ -12,9 +12,29 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// wsClient wraps a WebSocket connection with a mutex for safe concurrent writes
+type wsClient struct {
+	conn  *websocket.Conn
+	mutex sync.Mutex
+}
+
+// WriteJSON safely writes JSON to the WebSocket connection
+func (wc *wsClient) WriteJSON(v interface{}) error {
+	wc.mutex.Lock()
+	defer wc.mutex.Unlock()
+	return wc.conn.WriteJSON(v)
+}
+
+// Close closes the WebSocket connection
+func (wc *wsClient) Close() error {
+	wc.mutex.Lock()
+	defer wc.mutex.Unlock()
+	return wc.conn.Close()
+}
+
 // WebSocketServer handles WebSocket connections for real-time updates
 type WebSocketServer struct {
-	clients      map[*websocket.Conn]bool
+	clients      map[*websocket.Conn]*wsClient
 	clientsMutex sync.RWMutex
 	broadcast    chan interface{}
 	upgrader     websocket.Upgrader
@@ -50,7 +70,7 @@ func NewWebSocketServer(config WebSocketConfig, dataEngine *DataEngine) *WebSock
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &WebSocketServer{
-		clients:   make(map[*websocket.Conn]bool),
+		clients:   make(map[*websocket.Conn]*wsClient),
 		broadcast: make(chan interface{}, 100),
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  config.ReadBufferSize,
@@ -149,10 +169,10 @@ func (s *WebSocketServer) Stop() error {
 
 	// Close all client connections
 	s.clientsMutex.Lock()
-	for client := range s.clients {
+	for _, client := range s.clients {
 		client.Close()
 	}
-	s.clients = make(map[*websocket.Conn]bool)
+	s.clients = make(map[*websocket.Conn]*wsClient)
 	s.clientsMutex.Unlock()
 
 	// Shutdown HTTP server
@@ -177,9 +197,10 @@ func (s *WebSocketServer) HandleWebSocket(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Register client
+	// Register client with mutex wrapper
+	client := &wsClient{conn: conn}
 	s.clientsMutex.Lock()
-	s.clients[conn] = true
+	s.clients[conn] = client
 	s.clientsMutex.Unlock()
 
 	// Send initial data
@@ -187,7 +208,7 @@ func (s *WebSocketServer) HandleWebSocket(w http.ResponseWriter, r *http.Request
 		// Send metrics
 		metrics := s.dataEngine.GetMetrics()
 		if metrics != nil {
-			err := conn.WriteJSON(map[string]interface{}{
+			err := client.WriteJSON(map[string]interface{}{
 				"type":    "metrics",
 				"metrics": metrics,
 			})
@@ -199,7 +220,7 @@ func (s *WebSocketServer) HandleWebSocket(w http.ResponseWriter, r *http.Request
 		// Send alerts
 		alerts := s.dataEngine.GetActiveAlerts()
 		if len(alerts) > 0 {
-			err := conn.WriteJSON(map[string]interface{}{
+			err := client.WriteJSON(map[string]interface{}{
 				"type":   "alerts",
 				"alerts": alerts,
 			})
@@ -248,6 +269,16 @@ func (s *WebSocketServer) handleClient(conn *websocket.Conn) {
 
 // handleClientMessage handles a message from a WebSocket client
 func (s *WebSocketServer) handleClientMessage(conn *websocket.Conn, data map[string]interface{}) {
+	// Get the wrapped client
+	s.clientsMutex.RLock()
+	client, exists := s.clients[conn]
+	s.clientsMutex.RUnlock()
+
+	if !exists {
+		fmt.Printf("Client not found in registry\n")
+		return
+	}
+
 	// Check message type
 	msgType, ok := data["type"].(string)
 	if !ok {
@@ -258,7 +289,7 @@ func (s *WebSocketServer) handleClientMessage(conn *websocket.Conn, data map[str
 	switch msgType {
 	case "ping":
 		// Respond with pong
-		err := conn.WriteJSON(map[string]interface{}{
+		err := client.WriteJSON(map[string]interface{}{
 			"type": "pong",
 			"time": time.Now().Format(time.RFC3339),
 		})
@@ -275,7 +306,7 @@ func (s *WebSocketServer) handleClientMessage(conn *websocket.Conn, data map[str
 		}
 
 		// Acknowledge subscription
-		err := conn.WriteJSON(map[string]interface{}{
+		err := client.WriteJSON(map[string]interface{}{
 			"type":   "subscribed",
 			"topic":  topic,
 			"status": "success",
@@ -300,7 +331,7 @@ func (s *WebSocketServer) handleClientMessage(conn *websocket.Conn, data map[str
 		resolved := s.dataEngine.ResolveAlert(alertID)
 
 		// Send response
-		err := conn.WriteJSON(map[string]interface{}{
+		err := client.WriteJSON(map[string]interface{}{
 			"type":     "alert_resolved",
 			"alert_id": alertID,
 			"success":  resolved,
@@ -326,21 +357,30 @@ func (s *WebSocketServer) handleBroadcasts() {
 		case <-s.ctx.Done():
 			return
 		case message := <-s.broadcast:
-			// Broadcast message to all clients
+			// Get a snapshot of clients to avoid holding lock during writes
 			s.clientsMutex.RLock()
-			for client := range s.clients {
+			clients := make([]*wsClient, 0, len(s.clients))
+			connMap := make(map[*wsClient]*websocket.Conn)
+			for conn, client := range s.clients {
+				clients = append(clients, client)
+				connMap[client] = conn
+			}
+			s.clientsMutex.RUnlock()
+
+			// Broadcast message to all clients without holding the list lock
+			for _, client := range clients {
 				err := client.WriteJSON(message)
 				if err != nil {
 					fmt.Printf("Failed to broadcast message: %s\n", err.Error())
 					client.Close()
-					s.clientsMutex.RUnlock()
+					// Remove broken connection
 					s.clientsMutex.Lock()
-					delete(s.clients, client)
+					if conn, ok := connMap[client]; ok {
+						delete(s.clients, conn)
+					}
 					s.clientsMutex.Unlock()
-					s.clientsMutex.RLock()
 				}
 			}
-			s.clientsMutex.RUnlock()
 		}
 	}
 }
