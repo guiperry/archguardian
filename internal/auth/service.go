@@ -119,12 +119,16 @@ func (as *AuthService) StoreGitHubToken(userID string, auth *GitHubAuth) {
 
 // GetGitHubToken retrieves a GitHub token for a user
 func (as *AuthService) GetGitHubToken(userID string) (*GitHubAuth, bool) {
+	as.mutex.RLock()
+	defer as.mutex.RUnlock()
 	token, exists := as.tokens[userID]
 	return token, exists
 }
 
 // GetUser retrieves a user by ID
 func (as *AuthService) GetUser(userID string) (*User, bool) {
+	as.mutex.RLock()
+	defer as.mutex.RUnlock()
 	user, exists := as.users[userID]
 	return user, exists
 }

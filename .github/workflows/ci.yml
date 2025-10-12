@@ -171,14 +171,14 @@ jobs:
         docker run -d --name archguardian-test \
           -e PROJECT_PATH=/app \
           -e SCAN_INTERVAL_HOURS=1 \
-          -p 3000:3000 \
+          -p 8080:8080 \
           archguardian:latest
 
         # Wait for application to start and be ready
         echo "Waiting for application to start..."
         timeout 60s bash -c ' \
-          while ! curl -s -f http://localhost:3000/health > /dev/null; do \
-            echo "Attempting to connect to http://localhost:3000/health..."; \
+          while ! curl -s -f http://localhost:8080/health > /dev/null; do \
+            echo "Attempting to connect to http://localhost:8080/health..."; \
             sleep 2; \
           done'
         if [ $? -eq 0 ]; then
@@ -191,7 +191,7 @@ jobs:
 
         # Verify application is actually responding
         echo "Testing health endpoint..."
-        if ! curl -f http://localhost:3000/health; then
+        if ! curl -f http://localhost:8080/health; then
           echo "❌ Health check failed"
           docker logs archguardian-test
           exit 1
@@ -199,7 +199,7 @@ jobs:
 
         # Test API endpoints
         echo "Testing API endpoints..."
-        if ! curl -f http://localhost:3000/api/v1/knowledge-graph; then
+        if ! curl -f http://localhost:8080/api/v1/knowledge-graph; then
           echo "❌ Knowledge graph API test failed"
           docker logs archguardian-test
           exit 1
@@ -207,7 +207,7 @@ jobs:
 
         # Test authentication endpoints
         echo "Testing authentication endpoints..."
-        if ! curl -f http://localhost:3000/api/v1/auth/github/status; then
+        if ! curl -f http://localhost:8080/api/v1/auth/github/status; then
           echo "❌ Auth status API test failed"
           docker logs archguardian-test
           exit 1
