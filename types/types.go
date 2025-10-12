@@ -92,6 +92,8 @@ type KnowledgeGraph struct {
 type TechnicalDebtItem struct {
 	ID          string `json:"id"`
 	Location    string `json:"location"`
+	FilePath    string `json:"file_path"`
+	LineNumber   int    `json:"line_number"`
 	Type        string `json:"type"`
 	Severity    string `json:"severity"`
 	Description string `json:"description"`
@@ -99,34 +101,58 @@ type TechnicalDebtItem struct {
 	Effort      int    `json:"effort"`
 }
 
+// RemediationPlan represents a comprehensive remediation strategy
+type RemediationPlan struct {
+	ImmediateActions    []string          `json:"immediate_actions"`
+	ShortTermPlan       []string          `json:"short_term_plan"`
+	LongTermStrategy    []string          `json:"long_term_strategy"`
+	ResourceAllocation  map[string]string `json:"resource_allocation"`
+	SuccessMetrics      []string          `json:"success_metrics"`
+	RiskMitigationScore float64           `json:"risk_mitigation_score"`
+}
+
 // SecurityVulnerability represents a security vulnerability
 type SecurityVulnerability struct {
-	CVE         string  `json:"cve"`
-	Package     string  `json:"package"`
-	Version     string  `json:"version"`
-	Severity    string  `json:"severity"`
-	Description string  `json:"description"`
-	FixVersion  string  `json:"fix_version"`
+	ID          string `json:"id"`
+	Type        string `json:"type"`
+	FilePath    string `json:"file_path"`
+	LineNumber   int    `json:"line_number"`
+	CVE         string `json:"cve"`
+	Package     string `json:"package"`
+	Version     string `json:"version"`
+	Severity    string `json:"severity"`
+	Description string `json:"description"`
+	FixVersion  string `json:"fix_version"`
 	CVSS        float64 `json:"cvss"`
 }
 
 // ObsoleteCodeItem represents obsolete code
 type ObsoleteCodeItem struct {
-	Path            string    `json:"path"`
-	LastUsed        time.Time `json:"last_used,omitempty"`
-	References      int       `json:"references"`
-	RemovalSafety   string    `json:"removal_safety"`
-	RecommendAction string    `json:"recommend_action"`
+	ID             string    `json:"id"`
+	Type           string    `json:"type"`
+	FilePath       string    `json:"file_path"`
+	LineNumber      int       `json:"line_number"`
+	Description    string    `json:"description"`
+	Path           string    `json:"path"`
+	LastUsed       time.Time `json:"last_used,omitempty"`
+	ReferenceCount int       `json:"reference_count"`
+	References     int       `json:"references"` // Alias for backward compatibility
+	RemovalSafety  string    `json:"removal_safety"`
+	RecommendAction string   `json:"recommend_action"`
 }
 
 // DependencyRisk represents a dependency risk
 type DependencyRisk struct {
-	Package        string `json:"package"`
-	CurrentVersion string `json:"current_version"`
-	LatestVersion  string `json:"latest_version"`
-	SecurityIssues int    `json:"security_issues"`
-	Maintenance    string `json:"maintenance"`
-	Recommendation string `json:"recommendation"`
+	ID             string   `json:"id"`
+	PackageName    string   `json:"package_name"`
+	Package        string   `json:"package"` // Alias for backward compatibility
+	CurrentVersion string   `json:"current_version"`
+	LatestVersion  string   `json:"latest_version"`
+	RiskLevel      string   `json:"risk_level"`
+	Vulnerabilities []string `json:"vulnerabilities"`
+	SecurityIssues int      `json:"security_issues"`
+	Maintenance    string   `json:"maintenance"`
+	Recommendation string   `json:"recommendation"`
 }
 
 // RiskAssessment represents a complete risk assessment

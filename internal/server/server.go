@@ -14,6 +14,7 @@ import (
 	"archguardian/internal/config"
 	"archguardian/internal/guardian"
 	"archguardian/internal/project"
+	"archguardian/internal/remediation"
 	"archguardian/internal/scan"
 	"archguardian/internal/websocket"
 
@@ -174,6 +175,14 @@ func setupRoutes(router *mux.Router, guardian *ArchGuardian, authService *auth.A
 	}).Methods("GET")
 	api.HandleFunc("/scan/trigger", func(w http.ResponseWriter, r *http.Request) {
 		handleTriggerScan(w, r, guardian)
+	}).Methods("POST")
+
+	// AI Remediation endpoints
+	api.HandleFunc("/issues/{issueId}/remediate", func(w http.ResponseWriter, r *http.Request) {
+		handleRemediateIssue(w, r, guardian)
+	}).Methods("POST")
+	api.HandleFunc("/issues/{issueId}/apply-solution", func(w http.ResponseWriter, r *http.Request) {
+		handleApplySolution(w, r, guardian)
 	}).Methods("POST")
 
 	// Alerts endpoints
@@ -561,6 +570,125 @@ func handleClearResolvedAlerts(w http.ResponseWriter, _ *http.Request, _ *ArchGu
 	response := map[string]interface{}{
 		"success": true,
 		"cleared": 0,
+	}
+
+	jsonData, err := json.Marshal(response)
+	if err != nil {
+		http.Error(w, "Failed to marshal response", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write(jsonData)
+}
+
+// handleRemediateIssue handles AI-powered remediation for a specific issue
+func handleRemediateIssue(w http.ResponseWriter, r *http.Request, guardian *ArchGuardian) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if guardian == nil || guardian.Guardian == nil {
+		http.Error(w, "ArchGuardian not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	vars := mux.Vars(r)
+	issueID := vars["issueId"]
+
+	if issueID == "" {
+		http.Error(w, "Issue ID is required", http.StatusBadRequest)
+		return
+	}
+
+	// Extract issue type from request body
+	var req struct {
+		IssueType string `json:"issue_type"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.IssueType == "" {
+		http.Error(w, "Issue type is required", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("🤖 Starting AI remediation for issue: %s (type: %s)", issueID, req.IssueType)
+
+	// Trigger AI remediation
+	solution, err := guardian.Guardian.RemediateIssueWithAI(r.Context(), issueID, req.IssueType)
+	if err != nil {
+		log.Printf("❌ AI remediation failed: %v", err)
+		http.Error(w, fmt.Sprintf("AI remediation failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	response := map[string]interface{}{
+		"success":  true,
+		"message":  "AI solution generated successfully",
+		"solution": solution,
+		"issue_id": issueID,
+		"timestamp": time.Now().Format(time.RFC3339),
+	}
+
+	jsonData, err := json.Marshal(response)
+	if err != nil {
+		http.Error(w, "Failed to marshal response", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write(jsonData)
+}
+
+// handleApplySolution handles applying an AI-generated solution
+func handleApplySolution(w http.ResponseWriter, r *http.Request, guardian *ArchGuardian) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if guardian == nil || guardian.Guardian == nil {
+		http.Error(w, "ArchGuardian not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	vars := mux.Vars(r)
+	issueID := vars["issueId"]
+
+	if issueID == "" {
+		http.Error(w, "Issue ID is required", http.StatusBadRequest)
+		return
+	}
+
+	// Extract solution from request body
+	var req struct {
+		Solution *remediation.RemediationSolution `json:"solution"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.Solution == nil {
+		http.Error(w, "Solution is required", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("🔧 Applying AI solution for issue: %s", issueID)
+
+	// Apply the solution using the guardian
+	if err := guardian.Guardian.ApplySolution(r.Context(), issueID, req.Solution); err != nil {
+		log.Printf("❌ Failed to apply solution: %v", err)
+		http.Error(w, fmt.Sprintf("Failed to apply solution: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	response := map[string]interface{}{
+		"success":   true,
+		"message":   "Solution applied successfully",
+		"issue_id":  issueID,
+		"changes":   len(req.Solution.Changes),
+		"timestamp": time.Now().Format(time.RFC3339),
 	}
 
 	jsonData, err := json.Marshal(response)

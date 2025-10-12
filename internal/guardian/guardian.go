@@ -41,8 +41,8 @@ func (wsc *wsConnection) WriteMessage(messageType int, data []byte) error {
 	wsc.mutex.Lock()
 	defer wsc.mutex.Unlock()
 	// Set write deadline to prevent blocking indefinitely
-	// Increased to 30 seconds to accommodate slower network conditions and busy clients
-	wsc.conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
+	// Increased to 60 seconds for maximum resilience during long operations
+	wsc.conn.SetWriteDeadline(time.Now().Add(60 * time.Second))
 	return wsc.conn.WriteMessage(messageType, data)
 }
 
@@ -51,34 +51,38 @@ func (wsc *wsConnection) WriteJSON(v interface{}) error {
 	wsc.mutex.Lock()
 	defer wsc.mutex.Unlock()
 	// Set write deadline to prevent blocking indefinitely
-	// Increased to 30 seconds to accommodate slower network conditions and busy clients
-	wsc.conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
+	// Increased to 60 seconds for maximum resilience during long operations
+	wsc.conn.SetWriteDeadline(time.Now().Add(60 * time.Second))
 	return wsc.conn.WriteJSON(v)
 }
 
 // broadcastMessage represents a message to be broadcast to all WebSocket clients
 type broadcastMessage struct {
-	data []byte
+	data       []byte
+	retryCount int
+	timestamp  time.Time
 }
 
 // ArchGuardian is the main orchestration component that coordinates all services
 type ArchGuardian struct {
-	config          *config.Config
-	scanner         *scanner.Scanner
-	diagnoser       *risk.RiskDiagnoser
-	remediator      *remediation.Remediator
-	baseline        *BaselineChecker
-	dataEngine      *data_engine.DataEngine
-	chromemManager  *data_engine.ChromemManager // Persistent storage for knowledge graph and risks
-	logWriter       *logWriter                  // Real-time log streaming to dashboard
-	triggerScan     chan bool                   // Channel to trigger manual scans
-	dashboardConns  []*wsConnection             // Connected dashboard WebSocket clients
-	connMutex       sync.Mutex                  // Mutex for dashboard connections list
-	baselineStarted bool                        // Whether baseline periodic updates have been started
-	baselineMutex   sync.Mutex                  // Protects baselineStarted
-	projectID       string                      // Unique identifier for the current project
-	broadcastChan   chan broadcastMessage       // Channel for broadcasting messages to WebSocket clients
-	broadcastDone   chan struct{}               // Channel to signal broadcast goroutine shutdown
+	config             *config.Config
+	scanner            *scanner.Scanner
+	diagnoser          *risk.RiskDiagnoser
+	remediator         *remediation.Remediator
+	aiRemediator       *remediation.AIRemediator // AI-powered remediation service
+	baseline           *BaselineChecker
+	dataEngine         *data_engine.DataEngine
+	chromemManager     *data_engine.ChromemManager // Persistent storage for knowledge graph and risks
+	logWriter          *logWriter                  // Real-time log streaming to dashboard
+	triggerScan        chan bool                   // Channel to trigger manual scans
+	dashboardConns     []*wsConnection             // Connected dashboard WebSocket clients
+	connMutex          sync.Mutex                  // Mutex for dashboard connections list
+	baselineStarted    bool                        // Whether baseline periodic updates have been started
+	baselineMutex      sync.Mutex                  // Protects baselineStarted
+	projectID          string                      // Unique identifier for the current project
+	broadcastChan      chan broadcastMessage       // Channel for broadcasting messages to WebSocket clients
+	broadcastDone      chan struct{}               // Channel to signal broadcast goroutine shutdown
+	lastProgressUpdate time.Time                   // Timestamp of last progress update to throttle frequent updates
 }
 
 const (
@@ -382,8 +386,12 @@ func NewArchGuardian(config *config.Config, aiEngine *inference_engine.Inference
 	log.Println("✅ Scanner initialized successfully")
 
 	// Initialize risk diagnoser
-	diagnoser := risk.NewRiskDiagnoser(scannerInstance, aiEngine, nil) // TODO: Pass proper Codacy client when implemented
+	diagnoser := risk.NewRiskDiagnoser(scannerInstance, nil) // TODO: Pass proper Codacy client when implemented
 	log.Println("✅ Risk diagnoser initialized successfully")
+
+	// Initialize AI remediator
+	aiRemediator := remediation.NewAIRemediator(aiEngine, scannerInstance, diagnoser, chromemManager)
+	log.Println("✅ AI Remediator initialized successfully")
 
 	// Initialize remediator
 	remediatorInstance := remediation.NewRemediator(config, diagnoser, aiEngine)
@@ -398,6 +406,7 @@ func NewArchGuardian(config *config.Config, aiEngine *inference_engine.Inference
 		scanner:        scannerInstance,
 		diagnoser:      diagnoser,
 		remediator:     remediatorInstance,
+		aiRemediator:   aiRemediator,
 		baseline:       NewBaselineChecker(context.Background()),
 		dataEngine:     de,
 		chromemManager: chromemManager,
@@ -983,6 +992,7 @@ func (ag *ArchGuardian) removeDashboardConnectionByWrapper(wsConn *wsConnection)
 
 // broadcastWorker is a dedicated goroutine that handles all WebSocket broadcasts
 // This ensures all writes happen sequentially, preventing concurrent write panics
+// Includes retry logic for failed messages to improve reliability
 func (ag *ArchGuardian) broadcastWorker() {
 	for {
 		select {
@@ -996,7 +1006,28 @@ func (ag *ArchGuardian) broadcastWorker() {
 			// Write to connections without holding the list mutex
 			for _, conn := range conns {
 				if err := conn.WriteMessage(websocket.TextMessage, msg.data); err != nil {
-					// Don't log here to avoid recursive logging
+					// Implement retry logic for failed messages
+					if msg.retryCount < 3 { // Max 3 retries
+						// Exponential backoff: 100ms, 500ms, 2s
+						retryDelay := time.Duration(msg.retryCount+1) * 100 * time.Millisecond
+						if msg.retryCount > 0 {
+							retryDelay = time.Duration(msg.retryCount) * 500 * time.Millisecond
+						}
+
+						go func(conn *wsConnection, msg broadcastMessage, delay time.Duration) {
+							time.Sleep(delay)
+							// Re-queue message with incremented retry count
+							select {
+							case ag.broadcastChan <- broadcastMessage{
+								data:       msg.data,
+								retryCount: msg.retryCount + 1,
+								timestamp:  time.Now(),
+							}:
+							default:
+								// Channel full, drop retried message
+							}
+						}(conn, msg, retryDelay)
+					}
 					// Remove broken connection
 					go ag.removeDashboardConnectionByWrapper(conn)
 				}
@@ -1046,7 +1077,16 @@ func (ag *ArchGuardian) FlushInitialLogs() {
 }
 
 // sendProgressUpdate sends a progress update via WebSocket to all connected dashboard clients
+// Throttles frequent updates during intensive scanning to prevent overwhelming clients
 func (ag *ArchGuardian) sendProgressUpdate(phase string, progress float64, message string) {
+	// Throttle progress updates to prevent overwhelming the client during intensive operations
+	// Only send updates if it's been at least 500ms since the last update
+	now := time.Now()
+	if !ag.lastProgressUpdate.IsZero() && now.Sub(ag.lastProgressUpdate) < 500*time.Millisecond {
+		return
+	}
+	ag.lastProgressUpdate = now
+
 	progressUpdate := map[string]interface{}{
 		"type":      "scan_progress",
 		"phase":     phase,
@@ -1073,6 +1113,11 @@ func (ag *ArchGuardian) GetRemediator() *remediation.Remediator {
 	return ag.remediator
 }
 
+// GetAIRemediator returns the AI remediator instance
+func (ag *ArchGuardian) GetAIRemediator() *remediation.AIRemediator {
+	return ag.aiRemediator
+}
+
 // GetDataEngine returns the data engine instance
 func (ag *ArchGuardian) GetDataEngine() *data_engine.DataEngine {
 	return ag.dataEngine
@@ -1091,6 +1136,49 @@ func (ag *ArchGuardian) TriggerScan() {
 	default:
 		log.Println("Scan already in progress or trigger channel blocked")
 	}
+}
+
+// RemediateIssueWithAI generates and applies an AI-powered solution for a specific issue
+func (ag *ArchGuardian) RemediateIssueWithAI(ctx context.Context, issueID string, issueType string) (*remediation.RemediationSolution, error) {
+	log.Printf("🤖 Generating AI solution for issue: %s (type: %s)", issueID, issueType)
+
+	if ag.aiRemediator == nil {
+		return nil, fmt.Errorf("AI remediator not initialized")
+	}
+
+	solution, err := ag.aiRemediator.GenerateSolutionForIssue(ctx, issueID, issueType)
+	if err != nil {
+		return nil, fmt.Errorf("AI solution generation failed: %w", err)
+	}
+
+	// Broadcast solution to dashboard for user review
+	ag.BroadcastToDashboard("ai_solution_generated", solution)
+
+	log.Printf("✅ AI solution generated for issue: %s", issueID)
+	return solution, nil
+}
+
+// ApplySolution applies an AI-generated solution to the codebase
+func (ag *ArchGuardian) ApplySolution(ctx context.Context, issueID string, solution *remediation.RemediationSolution) error {
+	log.Printf("🔧 Applying AI solution for issue: %s", issueID)
+
+	if ag.aiRemediator == nil {
+		return fmt.Errorf("AI remediator not initialized")
+	}
+
+	if err := ag.aiRemediator.ApplySolution(ctx, issueID, solution); err != nil {
+		return fmt.Errorf("failed to apply solution: %w", err)
+	}
+
+	// Broadcast successful application
+	ag.BroadcastToDashboard("solution_applied", map[string]interface{}{
+		"issue_id":  issueID,
+		"changes":   len(solution.Changes),
+		"timestamp": time.Now().Format(time.RFC3339),
+	})
+
+	log.Printf("✅ Solution applied successfully for issue: %s", issueID)
+	return nil
 }
 
 // GetStatus returns the current status of ArchGuardian

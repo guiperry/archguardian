@@ -27,12 +27,13 @@ type Config struct {
 
 // AIProviderConfig defines the configuration for AI providers
 type AIProviderConfig struct {
-	Cerebras  ProviderCredentials `json:"cerebras"`
-	Gemini    ProviderCredentials `json:"gemini"`
-	Anthropic ProviderCredentials `json:"anthropic"`
-	OpenAI    ProviderCredentials `json:"openai"`
-	DeepSeek  ProviderCredentials `json:"deepseek"`
-	Embedding ProviderCredentials `json:"embedding"`
+	CloudFlare ProviderCredentials `json:"cloudflare"`
+	Cerebras   ProviderCredentials `json:"cerebras"`
+	Gemini     ProviderCredentials `json:"gemini"`
+	Anthropic  ProviderCredentials `json:"anthropic"`
+	OpenAI     ProviderCredentials `json:"openai"`
+	DeepSeek   ProviderCredentials `json:"deepseek"`
+	Embedding  ProviderCredentials `json:"embedding"`
 
 	CodeRemediationProvider string `json:"code_remediation_provider"`
 }
@@ -76,6 +77,11 @@ func Load() *Config {
 		RemediationBranch: getEnv("REMEDIATION_BRANCH", "archguardian-fixes"),
 		ServerPort:        getEnvInt("SERVER_PORT", 8080),
 		AIProviders: AIProviderConfig{
+			CloudFlare: ProviderCredentials{
+				APIKey:   getEnv("CLOUDFLARE_API_KEY", "dummy-key"),
+				Endpoint: getEnv("CLOUDFLARE_BASE_URL", ""),
+				Model:    getEnv("CLOUDFLARE_MODEL", "@cf/openai/gpt-oss-120b"),
+			},
 			Cerebras: ProviderCredentials{
 				APIKey:   getEnv("CEREBRAS_API_KEY", ""),
 				Endpoint: getEnv("CEREBRAS_ENDPOINT", "https://api.cerebras.ai/v1"),
@@ -193,7 +199,8 @@ func (v *DefaultSettingsValidator) Validate(settings *Config) error {
 	}
 
 	// Check if at least one AI provider has an API key
-	hasAPIKey := settings.AIProviders.Anthropic.APIKey != "" ||
+	hasAPIKey := settings.AIProviders.CloudFlare.Endpoint != "" ||
+		settings.AIProviders.Anthropic.APIKey != "" ||
 		settings.AIProviders.OpenAI.APIKey != "" ||
 		settings.AIProviders.Gemini.APIKey != "" ||
 		settings.AIProviders.Cerebras.APIKey != "" ||

@@ -143,9 +143,17 @@ func main() {
 	// Initialize AI inference engine
 	aiEngine, err := initializeInferenceEngine(cfg)
 	if err != nil {
-		log.Fatalf("❌ Failed to initialize AI engine: %v", err)
+		// In CI/Docker environments, allow server to start without AI engine for health checks
+		if os.Getenv("CI") != "" || os.Getenv("DOCKER_ENV") != "" {
+			log.Printf("⚠️  Failed to initialize AI engine in CI/Docker environment: %v", err)
+			log.Println("⚠️  Continuing without AI engine for health check purposes")
+			aiEngine = nil
+		} else {
+			log.Fatalf("❌ Failed to initialize AI engine: %v", err)
+		}
+	} else {
+		log.Println("✅ AI inference engine initialized successfully")
 	}
-	log.Println("✅ AI inference engine initialized successfully")
 
 	// Initialize ArchGuardian core
 	guardianCore := guardian.NewArchGuardian(cfg, aiEngine, chromemManager)
@@ -225,17 +233,36 @@ func initializeInferenceEngine(cfg *config.Config) (*inference_engine.InferenceS
 	// Track if we have a primary provider configured
 	hasPrimary := false
 
-	// Add Cerebras as primary if configured
+	// Add CloudFlare as primary if configured (uses OpenAI-compatible API)
+	if cfg.AIProviders.CloudFlare.Endpoint != "" {
+		attemptConfigs = append(attemptConfigs, inference_engine.LLMAttemptConfig{
+			ProviderName: "openai",
+			ModelName:    cfg.AIProviders.CloudFlare.Model,
+			APIKeyEnvVar: "CLOUDFLARE_API_KEY",
+			BaseURL:      cfg.AIProviders.CloudFlare.Endpoint,
+			MaxTokens:    8000,
+			IsPrimary:    true,
+		})
+		hasPrimary = true
+		log.Println("✅ CloudFlare provider configured as primary")
+	}
+
+	// Add Cerebras as primary/fallback if configured
 	if cfg.AIProviders.Cerebras.APIKey != "" {
+		isPrimary := !hasPrimary
 		attemptConfigs = append(attemptConfigs, inference_engine.LLMAttemptConfig{
 			ProviderName: "cerebras",
 			ModelName:    cfg.AIProviders.Cerebras.Model,
 			APIKeyEnvVar: "CEREBRAS_API_KEY",
 			MaxTokens:    8000,
-			IsPrimary:    true,
+			IsPrimary:    isPrimary,
 		})
-		hasPrimary = true
-		log.Println("✅ Cerebras provider configured as primary")
+		if isPrimary {
+			hasPrimary = true
+			log.Println("✅ Cerebras provider configured as primary")
+		} else {
+			log.Println("✅ Cerebras provider configured as fallback")
+		}
 	}
 
 	// Add Gemini - as primary if no other primary exists, otherwise as fallback

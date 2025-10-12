@@ -438,6 +438,78 @@
         </div>
     </div>
 
+    <!-- AI Remediation Modal -->
+    <div id="ai-remediation-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-content large-modal">
+            <div class="modal-header">
+                <h2>🤖 AI-Powered Remediation</h2>
+                <button class="close-btn" onclick="window.dashboard.closeAIRemediationModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="remediation-loading" class="remediation-loading" style="display: none;">
+                    <div class="loading-spinner"></div>
+                    <p>Generating AI solution...</p>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="remediation-progress"></div>
+                    </div>
+                </div>
+
+                <div id="remediation-content" class="remediation-content">
+                    <div class="solution-header">
+                        <div class="solution-meta">
+                            <h3 id="solution-issue-title">Issue Title</h3>
+                            <div class="solution-badges">
+                                <span class="solution-confidence" id="solution-confidence">Confidence: --</span>
+                                <span class="solution-risk" id="solution-risk">Risk: --</span>
+                            </div>
+                        </div>
+                        <div class="solution-actions">
+                            <button class="reject-btn" onclick="window.dashboard.rejectSolution()">Reject</button>
+                            <button class="approve-btn" onclick="window.dashboard.applySolution()">Apply Solution</button>
+                        </div>
+                    </div>
+
+                    <div class="solution-description" id="solution-description">
+                        <!-- Solution description will be inserted here -->
+                    </div>
+
+                    <div class="solution-changes">
+                        <h4>Proposed Code Changes</h4>
+                        <div id="solution-changes-list" class="changes-list">
+                            <!-- Code changes will be inserted here -->
+                        </div>
+                    </div>
+
+                    <div class="solution-test-plan">
+                        <h4>Test Plan</h4>
+                        <div id="solution-test-plan" class="test-plan-content">
+                            <!-- Test plan will be inserted here -->
+                        </div>
+                    </div>
+                </div>
+
+                <div id="remediation-applying" class="remediation-applying" style="display: none;">
+                    <div class="loading-spinner"></div>
+                    <p>Applying solution to codebase...</p>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="apply-progress"></div>
+                    </div>
+                    <div class="apply-status" id="apply-status">Creating backups...</div>
+                </div>
+
+                <div id="remediation-complete" class="remediation-complete" style="display: none;">
+                    <div class="success-icon">✅</div>
+                    <h3>Solution Applied Successfully!</h3>
+                    <p>The AI-generated solution has been applied to your codebase.</p>
+                    <div class="completion-details" id="completion-details">
+                        <!-- Completion details will be inserted here -->
+                    </div>
+                    <button class="close-success-btn" onclick="window.dashboard.closeAIRemediationModal()">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script src="app.js?v=1.0.1"></script>
 </body>
 </html>

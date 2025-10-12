@@ -246,7 +246,7 @@ class ArchGuardianDashboard {
                     console.error('Failed to send heartbeat:', error);
                 }
             }
-        }, 30000); // Send ping every 30 seconds
+        }, 15000); // Send ping every 15 seconds during scanning for better responsiveness
     }
 
     stopHeartbeat() {
@@ -1295,6 +1295,9 @@ class ArchGuardianDashboard {
                 <div class="issue-header">
                     <span class="issue-id">${item.id}</span>
                     <span class="issue-severity severity-${item.severity}">${item.severity}</span>
+                    <button class="ai-remediate-btn" onclick="window.dashboard.generateAISolution('${item.id}', 'technical_debt')" title="Generate AI Solution">
+                        🤖 Fix
+                    </button>
                 </div>
                 <div class="issue-description">${item.description}</div>
                 <div class="issue-location">Location: ${item.location}</div>
@@ -1313,6 +1316,9 @@ class ArchGuardianDashboard {
                 <div class="issue-header">
                     <span class="issue-id">${item.cve}</span>
                     <span class="issue-severity severity-${item.severity}">${item.severity}</span>
+                    <button class="ai-remediate-btn" onclick="window.dashboard.generateAISolution('${item.id}', 'security_vulnerability')" title="Generate AI Solution">
+                        🤖 Fix
+                    </button>
                 </div>
                 <div class="issue-description">${item.description}</div>
                 <div class="issue-package">Package: ${item.package}@${item.version}</div>
@@ -1348,6 +1354,9 @@ class ArchGuardianDashboard {
                 <div class="issue-header">
                     <span class="issue-package">${item.package}</span>
                     <span class="issue-maintenance status-${item.maintenance}">${item.maintenance}</span>
+                    <button class="ai-remediate-btn" onclick="window.dashboard.generateAISolution('${item.id}', 'dependency_risk')" title="Generate AI Solution">
+                        🤖 Fix
+                    </button>
                 </div>
                 <div class="issue-description">${item.recommendation}</div>
                 <div class="issue-versions">
@@ -2140,6 +2149,255 @@ class ArchGuardianDashboard {
             }, 300);
         }, 3000);
     }
+
+    // AI Remediation methods
+    async generateAISolution(issueId, issueType) {
+        this.showNotification('🤖 Generating AI solution...', 'info');
+
+        // Show the AI remediation modal
+        this.openAIRemediationModal();
+
+        // Show loading state
+        this.showRemediationLoading();
+
+        try {
+            const response = await fetch(`/api/v1/issues/${issueId}/remediate`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    issue_type: issueType
+                })
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}));
+                throw new Error(errorData.message || `Failed to generate AI solution (${response.status})`);
+            }
+
+            const data = await response.json();
+            const solution = data.solution;
+
+            if (!solution) {
+                throw new Error('No solution received from server');
+            }
+
+            // Display the solution
+            this.displayAISolution(solution);
+
+        } catch (error) {
+            console.error('AI solution generation failed:', error);
+            this.showNotification('Failed to generate AI solution: ' + error.message, 'error');
+            this.closeAIRemediationModal();
+        }
+    }
+
+    async applySolution() {
+        const issueId = this.currentAISolution?.IssueID;
+        if (!issueId) {
+            this.showNotification('No solution to apply', 'error');
+            return;
+        }
+
+        // Show applying state
+        this.showRemediationApplying();
+
+        try {
+            const response = await fetch(`/api/v1/issues/${issueId}/apply-solution`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    solution: this.currentAISolution
+                })
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}));
+                throw new Error(errorData.message || `Failed to apply solution (${response.status})`);
+            }
+
+            const data = await response.json();
+
+            // Show success state
+            this.showRemediationComplete(data);
+
+        } catch (error) {
+            console.error('Solution application failed:', error);
+            this.showNotification('Failed to apply solution: ' + error.message, 'error');
+            this.closeAIRemediationModal();
+        }
+    }
+
+    rejectSolution() {
+        this.showNotification('Solution rejected', 'info');
+        this.closeAIRemediationModal();
+    }
+
+    openAIRemediationModal() {
+        const modal = document.getElementById('ai-remediation-modal');
+        if (modal) {
+            modal.style.display = 'flex';
+        }
+    }
+
+    closeAIRemediationModal() {
+        const modal = document.getElementById('ai-remediation-modal');
+        if (modal) {
+            modal.style.display = 'none';
+        }
+        this.currentAISolution = null;
+    }
+
+    showRemediationLoading() {
+        // Hide all states
+        document.getElementById('remediation-loading').style.display = 'flex';
+        document.getElementById('remediation-content').style.display = 'none';
+        document.getElementById('remediation-applying').style.display = 'none';
+        document.getElementById('remediation-complete').style.display = 'none';
+
+        // Start progress animation
+        let progress = 0;
+        const progressInterval = setInterval(() => {
+            progress += Math.random() * 15;
+            if (progress > 90) progress = 90;
+            document.getElementById('remediation-progress').style.width = progress + '%';
+        }, 500);
+
+        // Store interval for cleanup
+        this.progressInterval = progressInterval;
+    }
+
+    displayAISolution(solution) {
+        // Clear any existing progress interval
+        if (this.progressInterval) {
+            clearInterval(this.progressInterval);
+            this.progressInterval = null;
+        }
+
+        this.currentAISolution = solution;
+
+        // Update solution title
+        const titleEl = document.getElementById('solution-issue-title');
+        if (titleEl) {
+            titleEl.textContent = solution.Description || 'AI-Generated Solution';
+        }
+
+        // Update confidence and risk badges
+        const confidenceEl = document.getElementById('solution-confidence');
+        if (confidenceEl) {
+            const confidencePercent = Math.round((solution.Confidence || 0) * 100);
+            confidenceEl.textContent = `Confidence: ${confidencePercent}%`;
+            confidenceEl.className = 'solution-confidence';
+            if (confidencePercent >= 80) confidenceEl.classList.add('high-confidence');
+            else if (confidencePercent >= 60) confidenceEl.classList.add('medium-confidence');
+            else confidenceEl.classList.add('low-confidence');
+        }
+
+        const riskEl = document.getElementById('solution-risk');
+        if (riskEl) {
+            riskEl.textContent = `Risk: ${solution.RiskLevel || 'Unknown'}`;
+            riskEl.className = 'solution-risk';
+            const riskLevel = (solution.RiskLevel || '').toLowerCase();
+            if (riskLevel === 'low') riskEl.classList.add('low-risk');
+            else if (riskLevel === 'medium') riskEl.classList.add('medium-risk');
+            else riskEl.classList.add('high-risk');
+        }
+
+        // Update solution description
+        const descEl = document.getElementById('solution-description');
+        if (descEl) {
+            descEl.innerHTML = `<p>${solution.Description || 'No description available'}</p>`;
+        }
+
+        // Update code changes
+        const changesEl = document.getElementById('solution-changes-list');
+        if (changesEl && solution.Changes) {
+            const changesHtml = solution.Changes.map(change => `
+                <div class="code-change">
+                    <div class="change-header">
+                        <strong>${change.FilePath || 'Unknown file'}</strong>
+                        <span class="change-lines">Lines ${change.LineStart || 1}-${change.LineEnd || 1}</span>
+                    </div>
+                    <div class="change-diff">
+                        <pre class="old-code">${this.escapeHtml(change.OldContent || '// Old code')}</pre>
+                        <pre class="new-code">${this.escapeHtml(change.NewContent || '// New code')}</pre>
+                    </div>
+                </div>
+            `).join('');
+            changesEl.innerHTML = changesHtml || '<p>No code changes specified</p>';
+        }
+
+        // Update test plan
+        const testEl = document.getElementById('solution-test-plan');
+        if (testEl) {
+            testEl.innerHTML = `<p>${solution.TestPlan || 'Run existing test suite and verify functionality'}</p>`;
+        }
+
+        // Show content state
+        document.getElementById('remediation-loading').style.display = 'none';
+        document.getElementById('remediation-content').style.display = 'block';
+        document.getElementById('remediation-applying').style.display = 'none';
+        document.getElementById('remediation-complete').style.display = 'none';
+    }
+
+    showRemediationApplying() {
+        document.getElementById('remediation-loading').style.display = 'none';
+        document.getElementById('remediation-content').style.display = 'none';
+        document.getElementById('remediation-applying').style.display = 'flex';
+        document.getElementById('remediation-complete').style.display = 'none';
+
+        // Start apply progress animation
+        let progress = 0;
+        const applyProgressInterval = setInterval(() => {
+            progress += Math.random() * 10;
+            if (progress > 95) progress = 95;
+            document.getElementById('apply-progress').style.width = progress + '%';
+        }, 300);
+
+        this.applyProgressInterval = applyProgressInterval;
+    }
+
+    showRemediationComplete(data) {
+        // Clear progress intervals
+        if (this.applyProgressInterval) {
+            clearInterval(this.applyProgressInterval);
+            this.applyProgressInterval = null;
+        }
+
+        // Complete the progress bar
+        document.getElementById('apply-progress').style.width = '100%';
+
+        // Update completion details
+        const detailsEl = document.getElementById('completion-details');
+        if (detailsEl && data) {
+            const changesCount = data.changes || 0;
+            detailsEl.innerHTML = `
+                <p>✅ Successfully applied ${changesCount} code change${changesCount !== 1 ? 's' : ''}</p>
+                <p>🔄 Issue resolved and codebase updated</p>
+                <p>🧪 Consider running your test suite to verify the changes</p>
+            `;
+        }
+
+        // Show completion state
+        document.getElementById('remediation-loading').style.display = 'none';
+        document.getElementById('remediation-content').style.display = 'none';
+        document.getElementById('remediation-applying').style.display = 'none';
+        document.getElementById('remediation-complete').style.display = 'flex';
+
+        // Refresh issues to show the resolved issue
+        setTimeout(() => {
+            this.refreshIssues();
+        }, 1000);
+    }
+
+    escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
 }
 
 // Initialize dashboard when DOM is loaded
@@ -2623,25 +2881,30 @@ style.textContent = `
 
 document.head.appendChild(style);
 
-// Expose thin global wrappers so inline onclick handlers in index.html work reliably.
-// They simply delegate to the dashboard instance.
-window.filterNodes = function(type) { if (window.dashboard && typeof window.dashboard.filterNodes === 'function') window.dashboard.filterNodes(type); };
-window.refreshGraph = function() { if (window.dashboard && typeof window.dashboard.refreshGraph === 'function') window.dashboard.refreshGraph(); };
-window.refreshIssues = function() { if (window.dashboard && typeof window.dashboard.refreshIssues === 'function') window.dashboard.refreshIssues(); };
-window.refreshCoverage = function() { if (window.dashboard && typeof window.dashboard.refreshCoverage === 'function') window.dashboard.refreshCoverage(); };
-window.saveSettings = function() { if (window.dashboard && typeof window.dashboard.saveSettings === 'function') window.dashboard.saveSettings(); };
-window.resetSettings = function() { if (window.dashboard && typeof window.dashboard.resetSettings === 'function') window.dashboard.resetSettings(); };
-window.selectFolder = function() { if (window.dashboard && typeof window.dashboard.selectFolder === 'function') window.dashboard.selectFolder(); };
-window.startScan = function(projectId) { if (window.dashboard && typeof window.dashboard.startScan === 'function') window.dashboard.startScan(projectId); };
-window.stopScan = function(projectId) { if (window.dashboard && typeof window.dashboard.stopScan === 'function') window.dashboard.stopScan(projectId); };
-window.connectLocalProject = function() { if (window.dashboard && typeof window.dashboard.connectLocalProject === 'function') window.dashboard.connectLocalProject(); };
-window.connectGitHubProject = function() { if (window.dashboard && typeof window.dashboard.connectGitHubProject === 'function') window.dashboard.connectGitHubProject(); };
-window.authenticateGitHub = function() { if (window.dashboard && typeof window.dashboard.authenticateGitHub === 'function') window.dashboard.authenticateGitHub(); };
-window.loadProjects = function() { if (window.dashboard && typeof window.dashboard.loadProjects === 'function') window.dashboard.loadProjects(); };
-window.loadKnowledgeGraph = function() { if (window.dashboard && typeof window.dashboard.loadKnowledgeGraph === 'function') window.dashboard.loadKnowledgeGraph(); };
-window.loadAlerts = function() { if (window.dashboard && typeof window.dashboard.loadAlerts === 'function') window.dashboard.loadAlerts(); };
-window.clearResolvedAlerts = function() { if (window.dashboard && typeof window.dashboard.clearResolvedAlerts === 'function') window.dashboard.clearResolvedAlerts(); };
-window.resolveAlert = function(alertId) { if (window.dashboard && typeof window.dashboard.resolveAlert === 'function') window.dashboard.resolveAlert(alertId); };
+
+    // Expose thin global wrappers so inline onclick handlers in index.html work reliably.
+    // They simply delegate to the dashboard instance.
+    window.filterNodes = function(type) { if (window.dashboard && typeof window.dashboard.filterNodes === 'function') window.dashboard.filterNodes(type); };
+    window.refreshGraph = function() { if (window.dashboard && typeof window.dashboard.refreshGraph === 'function') window.dashboard.refreshGraph(); };
+    window.refreshIssues = function() { if (window.dashboard && typeof window.dashboard.refreshIssues === 'function') window.dashboard.refreshIssues(); };
+    window.refreshCoverage = function() { if (window.dashboard && typeof window.dashboard.refreshCoverage === 'function') window.dashboard.refreshCoverage(); };
+    window.saveSettings = function() { if (window.dashboard && typeof window.dashboard.saveSettings === 'function') window.dashboard.saveSettings(); };
+    window.resetSettings = function() { if (window.dashboard && typeof window.dashboard.resetSettings === 'function') window.dashboard.resetSettings(); };
+    window.selectFolder = function() { if (window.dashboard && typeof window.dashboard.selectFolder === 'function') window.dashboard.selectFolder(); };
+    window.startScan = function(projectId) { if (window.dashboard && typeof window.dashboard.startScan === 'function') window.dashboard.startScan(projectId); };
+    window.stopScan = function(projectId) { if (window.dashboard && typeof window.dashboard.stopScan === 'function') window.dashboard.stopScan(projectId); };
+    window.connectLocalProject = function() { if (window.dashboard && typeof window.dashboard.connectLocalProject === 'function') window.dashboard.connectLocalProject(); };
+    window.connectGitHubProject = function() { if (window.dashboard && typeof window.dashboard.connectGitHubProject === 'function') window.dashboard.connectGitHubProject(); };
+    window.authenticateGitHub = function() { if (window.dashboard && typeof window.dashboard.authenticateGitHub === 'function') window.dashboard.authenticateGitHub(); };
+    window.loadProjects = function() { if (window.dashboard && typeof window.dashboard.loadProjects === 'function') window.dashboard.loadProjects(); };
+    window.loadKnowledgeGraph = function() { if (window.dashboard && typeof window.dashboard.loadKnowledgeGraph === 'function') window.dashboard.loadKnowledgeGraph(); };
+    window.loadAlerts = function() { if (window.dashboard && typeof window.dashboard.loadAlerts === 'function') window.dashboard.loadAlerts(); };
+    window.clearResolvedAlerts = function() { if (window.dashboard && typeof window.dashboard.clearResolvedAlerts === 'function') window.dashboard.clearResolvedAlerts(); };
+    window.resolveAlert = function(alertId) { if (window.dashboard && typeof window.dashboard.resolveAlert === 'function') window.dashboard.resolveAlert(alertId); };
+    window.generateAISolution = function(issueId, issueType) { if (window.dashboard && typeof window.dashboard.generateAISolution === 'function') window.dashboard.generateAISolution(issueId, issueType); };
+    window.applySolution = function() { if (window.dashboard && typeof window.dashboard.applySolution === 'function') window.dashboard.applySolution(); };
+    window.rejectSolution = function() { if (window.dashboard && typeof window.dashboard.rejectSolution === 'function') window.dashboard.rejectSolution(); };
+    window.closeAIRemediationModal = function() { if (window.dashboard && typeof window.dashboard.closeAIRemediationModal === 'function') window.dashboard.closeAIRemediationModal(); };
 
 // Note: Folder browse buttons use inline onclick handlers to maintain user activation context
 // for the File System Access API. Event delegation would break this requirement.

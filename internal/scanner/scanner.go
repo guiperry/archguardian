@@ -97,7 +97,7 @@ func (s *Scanner) ScanProject(ctx context.Context) error {
 }
 
 // scanStaticCode performs static code analysis on all code files
-func (s *Scanner) scanStaticCode(ctx context.Context) error {
+func (s *Scanner) scanStaticCode(_ context.Context) error {
 	log.Println("  📄 Scanning static code...")
 
 	err := filepath.Walk(s.config.ProjectPath, func(path string, info os.FileInfo, err error) error {
@@ -133,24 +133,18 @@ func (s *Scanner) scanStaticCode(ctx context.Context) error {
 				dependencies := s.parseFileDependencies(path, content)
 				node.Dependencies = dependencies
 
-				// Use AI for analysis if available - context strategist will handle large files via chunking
-				if s.ai != nil && s.ai.IsRunning() {
-					// Create a timeout context for AI analysis
-					// Timeout is generous to allow for chunking of large files
-					// The context strategist will automatically chunk files that exceed token limits
-					aiCtx, aiCancel := context.WithTimeout(ctx, 2*time.Minute)
-					defer aiCancel()
+				// Calculate deterministic code quality metrics
+				complexity := s.calculateCyclomaticComplexity(path, content)
+				node.Metadata["cyclomatic_complexity"] = complexity
 
-					log.Printf("  🔍 Analyzing %s (%d bytes) with AI...", filepath.Base(path), info.Size())
-					analysis, err := s.ai.GenerateText(aiCtx, "gemini-2.5-flash", fmt.Sprintf("Analyze this code file for complexity and quality:\n\n%s", string(content)), "")
-					if err != nil {
-						// Log warning but continue - AI analysis is optional
-						log.Printf("  ⚠️  AI analysis failed for %s: %v", filepath.Base(path), err)
-					} else if analysis != "" {
-						node.Metadata["ai_analysis"] = analysis
-						log.Printf("  ✅ AI analysis completed for %s", filepath.Base(path))
-					}
+				// Detect code smells using rule-based patterns
+				codeSmells := s.detectCodeSmells(path, content)
+				if len(codeSmells) > 0 {
+					node.Metadata["code_smells"] = codeSmells
 				}
+
+				log.Printf("  📊 Analyzed %s: %d lines, complexity %d, %d code smells",
+					filepath.Base(path), node.Metadata["lines"], complexity, len(codeSmells))
 			}
 
 			s.graph.Nodes[node.ID] = node
@@ -328,7 +322,7 @@ func (s *Scanner) scanRuntime() error {
 }
 
 // scanDatabaseModels scans for database models and schemas
-func (s *Scanner) scanDatabaseModels(ctx context.Context) error {
+func (s *Scanner) scanDatabaseModels(_ context.Context) error {
 	log.Println("  🗄️  Scanning database models...")
 
 	// Look for common ORM patterns
@@ -347,12 +341,6 @@ func (s *Scanner) scanDatabaseModels(ctx context.Context) error {
 				continue
 			}
 
-			// Get file info for size check
-			fileInfo, err := os.Stat(path)
-			if err != nil {
-				continue
-			}
-
 			// Create node structure
 			node := &types.Node{
 				ID:       s.generateNodeID(path),
@@ -362,23 +350,13 @@ func (s *Scanner) scanDatabaseModels(ctx context.Context) error {
 				Metadata: make(map[string]interface{}),
 			}
 
-			// Use AI for deep analysis of database models if available
-			// Context strategist will handle large files via chunking
-			if s.ai != nil && s.ai.IsRunning() {
-				// Create a timeout context for AI analysis
-				// Timeout is generous to allow for chunking of large files
-				aiCtx, aiCancel := context.WithTimeout(ctx, 2*time.Minute)
-				defer aiCancel()
-
-				log.Printf("  🔍 Analyzing database model %s (%d bytes) with AI...", filepath.Base(path), fileInfo.Size())
-				analysis, err := s.ai.GenerateText(aiCtx, "gemini-2.5-flash", fmt.Sprintf("Analyze this database model for structure and relationships:\n\n%s", string(content)), "")
-				if err != nil {
-					log.Printf("  ⚠️  AI analysis failed for database model %s: %v", filepath.Base(path), err)
-				} else if analysis != "" {
-					node.Metadata["analysis"] = analysis
-					log.Printf("  ✅ AI analysis completed for database model %s", filepath.Base(path))
-				}
+			// Extract deterministic database relationships
+			relationships := s.extractDatabaseRelationships(path, content)
+			if len(relationships) > 0 {
+				node.Metadata["relationships"] = relationships
 			}
+
+			log.Printf("  📊 Analyzed database model %s: %d relationships", filepath.Base(path), len(relationships))
 
 			// Add node to graph (with or without AI analysis)
 			s.graph.Nodes[node.ID] = node
@@ -476,43 +454,47 @@ func (s *Scanner) scanTestCoverage(ctx context.Context) error {
 	return nil
 }
 
-// buildKnowledgeGraph builds relationships between nodes using AI
+// buildKnowledgeGraph builds relationships between nodes deterministically
 func (s *Scanner) buildKnowledgeGraph(ctx context.Context) error {
 	log.Println("  🕸️  Building knowledge graph...")
 
-	// Use AI for deep reasoning about relationships if available
-	if s.ai != nil && s.ai.IsRunning() {
-		graphData := s.prepareGraphData()
-		relationships, err := s.inferRelationshipsWithAI(ctx, graphData)
-		if err != nil {
-			log.Printf("Warning: relationship inference failed: %v", err)
-		} else {
-			// Build edges based on AI inference
-			for _, rel := range relationships {
-				edge := &types.Edge{
-					From:         rel.From,
-					To:           rel.To,
-					Relationship: rel.Type,
-					Strength:     rel.Confidence,
-					Metadata:     rel.Metadata,
-				}
-				s.graph.Edges = append(s.graph.Edges, edge)
-			}
+	// Prepare graph data for relationship analysis
+	graphData := s.prepareGraphData()
+	log.Printf("  📊 Prepared graph data with %d nodes", graphData["count"])
+
+	// Infer relationships using deterministic rule-based analysis
+	relationships := s.inferRelationshipsDeterministically(graphData)
+
+	// Convert relationships to graph edges
+	for _, rel := range relationships {
+		edge := &types.Edge{
+			From:         rel.From,
+			To:           rel.To,
+			Relationship: rel.Type,
+			Strength:     rel.Confidence,
+			Metadata:     rel.Metadata,
 		}
+		s.graph.Edges = append(s.graph.Edges, edge)
 	}
 
+	// Also build edges from existing deterministic methods
+	s.buildDeterministicEdges(ctx)
+
+	log.Printf("  🕸️  Knowledge graph complete: %d nodes, %d edges", len(s.graph.Nodes), len(s.graph.Edges))
 	return nil
 }
 
-// prepareGraphData prepares graph data for AI analysis
+// prepareGraphData prepares graph data for deterministic relationship analysis
 func (s *Scanner) prepareGraphData() map[string]interface{} {
 	nodes := make([]map[string]interface{}, 0)
 	for _, node := range s.graph.Nodes {
 		nodes = append(nodes, map[string]interface{}{
-			"id":   node.ID,
-			"type": node.Type,
-			"name": node.Name,
-			"path": node.Path,
+			"id":           node.ID,
+			"type":         node.Type,
+			"name":         node.Name,
+			"path":         node.Path,
+			"dependencies": node.Dependencies,
+			"metadata":     node.Metadata,
 		})
 	}
 
@@ -522,24 +504,142 @@ func (s *Scanner) prepareGraphData() map[string]interface{} {
 	}
 }
 
-// inferRelationshipsWithAI uses AI to infer relationships between nodes
-func (s *Scanner) inferRelationshipsWithAI(ctx context.Context, graphData map[string]interface{}) ([]Relationship, error) {
-	graphJSON, _ := json.Marshal(graphData)
-	prompt := fmt.Sprintf("Analyze these code elements and infer relationships between them. Return JSON with from, to, type, confidence fields:\n\n%s", string(graphJSON))
-
-	response, err := s.ai.GenerateText(ctx, "gemini", prompt, "")
-	if err != nil {
-		return nil, err
-	}
-
-	// Parse JSON response
+// inferRelationshipsDeterministically uses rule-based analysis to infer relationships between nodes
+func (s *Scanner) inferRelationshipsDeterministically(graphData map[string]interface{}) []Relationship {
 	var relationships []Relationship
-	if err := json.Unmarshal([]byte(response), &relationships); err != nil {
-		log.Printf("⚠️  Could not parse AI relationship inference: %v", err)
-		return nil, fmt.Errorf("failed to parse relationships: %w", err)
+
+	nodes, ok := graphData["nodes"].([]map[string]interface{})
+	if !ok {
+		return relationships
 	}
 
-	return relationships, nil
+	// Create a map for quick node lookup
+	nodeMap := make(map[string]map[string]interface{})
+	for _, node := range nodes {
+		nodeMap[node["id"].(string)] = node
+	}
+
+	// Rule 1: File import relationships
+	for _, node := range nodes {
+		if deps, ok := node["dependencies"].([]string); ok {
+			for _, dep := range deps {
+				// Find the dependency node
+				for _, targetNode := range nodes {
+					if targetNode["name"] == dep || strings.Contains(targetNode["path"].(string), dep) {
+						relationships = append(relationships, Relationship{
+							From:       node["id"].(string),
+							To:         targetNode["id"].(string),
+							Type:       "imports",
+							Confidence: 1.0,
+							Metadata: map[string]interface{}{
+								"dependency": dep,
+								"rule":       "import_analysis",
+							},
+						})
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// Rule 2: Directory structure relationships
+	for _, node := range nodes {
+		nodePath := node["path"].(string)
+		dir := filepath.Dir(nodePath)
+
+		// Find other nodes in the same directory
+		for _, otherNode := range nodes {
+			if otherNode["id"] == node["id"] {
+				continue
+			}
+			otherPath := otherNode["path"].(string)
+			otherDir := filepath.Dir(otherPath)
+
+			if dir == otherDir {
+				relationships = append(relationships, Relationship{
+					From:       node["id"].(string),
+					To:         otherNode["id"].(string),
+					Type:       "co_located",
+					Confidence: 0.8,
+					Metadata: map[string]interface{}{
+						"directory": dir,
+						"rule":      "directory_co_location",
+					},
+				})
+			}
+		}
+	}
+
+	// Rule 3: Type-based relationships
+	for _, node := range nodes {
+		nodeType := node["type"]
+
+		// Find nodes of related types
+		for _, otherNode := range nodes {
+			if otherNode["id"] == node["id"] {
+				continue
+			}
+
+			otherType := otherNode["type"]
+
+			// Define type relationship rules using string comparison
+			if (nodeType == "code" && otherType == "api") ||
+				(nodeType == "api" && otherType == "code") {
+				relationships = append(relationships, Relationship{
+					From:       node["id"].(string),
+					To:         otherNode["id"].(string),
+					Type:       "implements",
+					Confidence: 0.7,
+					Metadata: map[string]interface{}{
+						"rule": "type_complementarity",
+					},
+				})
+			}
+		}
+	}
+
+	// Rule 4: Database relationship inference
+	for _, node := range nodes {
+		if metadata, ok := node["metadata"].(map[string]interface{}); ok {
+			if relationshipsData, ok := metadata["relationships"].([]DatabaseRelationship); ok {
+				for _, dbRel := range relationshipsData {
+					// Find the target table node
+					for _, targetNode := range nodes {
+						if targetNode["name"] == dbRel.ToTable || strings.Contains(targetNode["path"].(string), dbRel.ToTable) {
+							relationships = append(relationships, Relationship{
+								From:       node["id"].(string),
+								To:         targetNode["id"].(string),
+								Type:       dbRel.Type,
+								Confidence: 0.9,
+								Metadata: map[string]interface{}{
+									"database_relationship": true,
+									"column":                dbRel.Column,
+									"description":           dbRel.Description,
+									"rule":                  "database_relationship_extraction",
+								},
+							})
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Remove duplicate relationships
+	seen := make(map[string]bool)
+	var uniqueRelationships []Relationship
+	for _, rel := range relationships {
+		key := fmt.Sprintf("%s->%s:%s", rel.From, rel.To, rel.Type)
+		if !seen[key] {
+			seen[key] = true
+			uniqueRelationships = append(uniqueRelationships, rel)
+		}
+	}
+
+	log.Printf("  🔍 Deterministic relationship inference found %d relationships", len(uniqueRelationships))
+	return uniqueRelationships
 }
 
 // Relationship represents a relationship between code elements (local version)
@@ -1274,6 +1374,453 @@ func (rs *RuntimeScanner) scanSystemResources() ([]*types.Node, error) {
 	}
 
 	return nodes, nil
+}
+
+// calculateCyclomaticComplexity calculates the cyclomatic complexity of a code file
+func (s *Scanner) calculateCyclomaticComplexity(_ string, content []byte) int {
+	text := string(content)
+	complexity := 1 // Base complexity
+
+	// Decision points that increase complexity
+	patterns := []string{
+		`\bif\s*\(`,        // if statements
+		`\belse\s+if\s*\(`, // else if statements
+		`\bfor\s*\(`,       // for loops
+		`\bwhile\s*\(`,     // while loops
+		`\bcase\s+.*:`,     // switch cases
+		`\bcatch\s*\(`,     // catch blocks
+		`\b\|\|`,           // logical OR
+		`\b&&`,             // logical AND
+		`\?`,               // ternary operator
+	}
+
+	for _, pattern := range patterns {
+		regex := regexp.MustCompile(pattern)
+		matches := regex.FindAllString(text, -1)
+		complexity += len(matches)
+	}
+
+	return complexity
+}
+
+// CodeSmell represents a detected code smell
+type CodeSmell struct {
+	Type        string `json:"type"`
+	Description string `json:"description"`
+	Line        int    `json:"line"`
+	Severity    string `json:"severity"`
+}
+
+// detectCodeSmells performs rule-based code smell detection
+func (s *Scanner) detectCodeSmells(_ string, content []byte) []CodeSmell {
+	var smells []CodeSmell
+	text := string(content)
+	lines := strings.Split(text, "\n")
+
+	// Rule 1: Long methods/functions (>50 lines)
+	methodStart := -1
+	methodName := ""
+	braceCount := 0
+
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+
+		// Detect method/function start
+		if strings.Contains(line, "func ") && strings.Contains(line, "(") && strings.Contains(line, ")") {
+			if methodStart != -1 {
+				// End previous method
+				methodLength := i - methodStart
+				if methodLength > 50 {
+					smells = append(smells, CodeSmell{
+						Type:        "LongMethod",
+						Description: fmt.Sprintf("Method '%s' is too long (%d lines)", methodName, methodLength),
+						Line:        methodStart + 1,
+						Severity:    "Medium",
+					})
+				}
+			}
+			methodStart = i
+			methodName = strings.Split(line, " ")[1]
+			if idx := strings.Index(methodName, "("); idx != -1 {
+				methodName = methodName[:idx]
+			}
+			braceCount = 0
+		}
+
+		// Count braces to detect method end
+		for _, char := range line {
+			switch char {
+			case '{':
+				braceCount++
+			case '}':
+				braceCount--
+				if braceCount == 0 && methodStart != -1 {
+					methodLength := i - methodStart + 1
+					if methodLength > 50 {
+						smells = append(smells, CodeSmell{
+							Type:        "LongMethod",
+							Description: fmt.Sprintf("Method '%s' is too long (%d lines)", methodName, methodLength),
+							Line:        methodStart + 1,
+							Severity:    "Medium",
+						})
+					}
+					methodStart = -1
+					methodName = ""
+				}
+			}
+		}
+	}
+
+	// Rule 2: Deep nesting (>3 levels)
+	for i, line := range lines {
+		leadingSpaces := len(line) - len(strings.TrimLeft(line, " \t"))
+		nestingLevel := leadingSpaces / 4 // Assuming 4 spaces per indent level
+		if nestingLevel > 3 {
+			smells = append(smells, CodeSmell{
+				Type:        "DeepNesting",
+				Description: fmt.Sprintf("Deep nesting detected (level %d)", nestingLevel),
+				Line:        i + 1,
+				Severity:    "Medium",
+			})
+		}
+	}
+
+	// Rule 3: Long lines (>120 characters)
+	for i, line := range lines {
+		if len(line) > 120 {
+			smells = append(smells, CodeSmell{
+				Type:        "LongLine",
+				Description: fmt.Sprintf("Line too long (%d characters)", len(line)),
+				Line:        i + 1,
+				Severity:    "Low",
+			})
+		}
+	}
+
+	// Rule 4: TODO/FIXME comments
+	todoRegex := regexp.MustCompile(`(?i)(TODO|FIXME|XXX|HACK)`)
+	for i, line := range lines {
+		if todoRegex.MatchString(line) {
+			smells = append(smells, CodeSmell{
+				Type:        "TodoComment",
+				Description: "TODO/FIXME comment found",
+				Line:        i + 1,
+				Severity:    "Low",
+			})
+		}
+	}
+
+	// Rule 5: Magic numbers (excluding common values)
+	magicNumRegex := regexp.MustCompile(`\b\d{2,}\b`)
+	for i, line := range lines {
+		matches := magicNumRegex.FindAllString(line, -1)
+		for _, match := range matches {
+			// Skip common non-magic numbers
+			if match == "0" || match == "1" || match == "10" || match == "100" || match == "1000" {
+				continue
+			}
+			smells = append(smells, CodeSmell{
+				Type:        "MagicNumber",
+				Description: fmt.Sprintf("Magic number '%s' detected", match),
+				Line:        i + 1,
+				Severity:    "Low",
+			})
+		}
+	}
+
+	// Rule 6: Empty catch blocks
+	catchRegex := regexp.MustCompile(`\bcatch\s*\([^)]*\)\s*\{\s*\}`)
+	for i, line := range lines {
+		if catchRegex.MatchString(line) {
+			smells = append(smells, CodeSmell{
+				Type:        "EmptyCatch",
+				Description: "Empty catch block",
+				Line:        i + 1,
+				Severity:    "High",
+			})
+		}
+	}
+
+	return smells
+}
+
+// DatabaseRelationship represents a relationship extracted from database models
+type DatabaseRelationship struct {
+	Type        string `json:"type"` // "belongs_to", "has_many", "has_one", "foreign_key"
+	FromTable   string `json:"from_table"`
+	ToTable     string `json:"to_table"`
+	Column      string `json:"column"`
+	Reference   string `json:"reference"`
+	Description string `json:"description"`
+}
+
+// extractDatabaseRelationships parses ORM models for relationships
+func (s *Scanner) extractDatabaseRelationships(filePath string, content []byte) []DatabaseRelationship {
+	var relationships []DatabaseRelationship
+	text := string(content)
+	lines := strings.Split(text, "\n")
+
+	ext := strings.ToLower(filepath.Ext(filePath))
+
+	switch ext {
+	case ".go":
+		relationships = s.extractGoRelationships(lines)
+	case ".py":
+		relationships = s.extractPythonRelationships(lines)
+	case ".js", ".ts":
+		relationships = s.extractJavaScriptRelationships(lines)
+	default:
+		// Generic extraction for unknown ORM patterns
+		relationships = s.extractGenericRelationships(lines)
+	}
+
+	return relationships
+}
+
+// extractGoRelationships extracts relationships from Go ORM models (e.g., GORM)
+func (s *Scanner) extractGoRelationships(lines []string) []DatabaseRelationship {
+	var relationships []DatabaseRelationship
+
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+
+		// GORM foreign key patterns
+		if strings.Contains(line, "gorm:\"foreignKey:") {
+			// Extract foreign key information
+			parts := strings.Split(line, "gorm:\"foreignKey:")
+			if len(parts) > 1 {
+				fkInfo := strings.Split(parts[1], "\"")[0]
+				relationships = append(relationships, DatabaseRelationship{
+					Type:        "foreign_key",
+					Column:      s.extractFieldName(lines, i),
+					Reference:   fkInfo,
+					Description: fmt.Sprintf("Foreign key reference: %s", fkInfo),
+				})
+			}
+		}
+
+		// GORM relationship patterns
+		if strings.Contains(line, "gorm:\"references:") {
+			parts := strings.Split(line, "gorm:\"references:")
+			if len(parts) > 1 {
+				refInfo := strings.Split(parts[1], "\"")[0]
+				relationships = append(relationships, DatabaseRelationship{
+					Type:        "references",
+					Column:      s.extractFieldName(lines, i),
+					Reference:   refInfo,
+					Description: fmt.Sprintf("References: %s", refInfo),
+				})
+			}
+		}
+	}
+
+	return relationships
+}
+
+// extractPythonRelationships extracts relationships from Python ORM models (e.g., SQLAlchemy, Django)
+func (s *Scanner) extractPythonRelationships(lines []string) []DatabaseRelationship {
+	var relationships []DatabaseRelationship
+
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+
+		// Django ForeignKey
+		if strings.Contains(line, "models.ForeignKey(") {
+			parts := strings.Split(line, "=")
+			if len(parts) > 1 {
+				fieldName := strings.TrimSpace(parts[0])
+				fkPattern := regexp.MustCompile(`models\.ForeignKey\(['"]([^'"]+)['"]`)
+				matches := fkPattern.FindStringSubmatch(line)
+				if len(matches) > 1 {
+					relationships = append(relationships, DatabaseRelationship{
+						Type:        "foreign_key",
+						FromTable:   s.extractClassName(lines, i),
+						ToTable:     matches[1],
+						Column:      fieldName,
+						Description: fmt.Sprintf("Django ForeignKey to %s", matches[1]),
+					})
+				}
+			}
+		}
+
+		// SQLAlchemy relationship
+		if strings.Contains(line, "relationship(") {
+			relPattern := regexp.MustCompile(`relationship\(['"]([^'"]+)['"]`)
+			matches := relPattern.FindStringSubmatch(line)
+			if len(matches) > 1 {
+				relationships = append(relationships, DatabaseRelationship{
+					Type:        "relationship",
+					FromTable:   s.extractClassName(lines, i),
+					ToTable:     matches[1],
+					Description: fmt.Sprintf("SQLAlchemy relationship to %s", matches[1]),
+				})
+			}
+		}
+	}
+
+	return relationships
+}
+
+// extractJavaScriptRelationships extracts relationships from JS/TS ORM models
+func (s *Scanner) extractJavaScriptRelationships(lines []string) []DatabaseRelationship {
+	var relationships []DatabaseRelationship
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+
+		// Sequelize belongsTo
+		if strings.Contains(line, ".belongsTo(") {
+			belongsToPattern := regexp.MustCompile(`(\w+)\.belongsTo\((\w+)`)
+			matches := belongsToPattern.FindStringSubmatch(line)
+			if len(matches) > 2 {
+				relationships = append(relationships, DatabaseRelationship{
+					Type:        "belongs_to",
+					FromTable:   matches[1],
+					ToTable:     matches[2],
+					Description: fmt.Sprintf("Sequelize belongsTo relationship: %s -> %s", matches[1], matches[2]),
+				})
+			}
+		}
+
+		// Sequelize hasMany
+		if strings.Contains(line, ".hasMany(") {
+			hasManyPattern := regexp.MustCompile(`(\w+)\.hasMany\((\w+)`)
+			matches := hasManyPattern.FindStringSubmatch(line)
+			if len(matches) > 2 {
+				relationships = append(relationships, DatabaseRelationship{
+					Type:        "has_many",
+					FromTable:   matches[1],
+					ToTable:     matches[2],
+					Description: fmt.Sprintf("Sequelize hasMany relationship: %s -> %s", matches[1], matches[2]),
+				})
+			}
+		}
+	}
+
+	return relationships
+}
+
+// extractGenericRelationships extracts relationships using generic patterns
+func (s *Scanner) extractGenericRelationships(lines []string) []DatabaseRelationship {
+	var relationships []DatabaseRelationship
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+
+		// Generic foreign key patterns
+		fkPatterns := []string{
+			`foreign[_-]?key`,
+			`references`,
+			`belongs[_-]?to`,
+			`has[_-]?many`,
+			`has[_-]?one`,
+		}
+
+		for _, pattern := range fkPatterns {
+			regex := regexp.MustCompile(`(?i)` + pattern)
+			if regex.MatchString(line) {
+				relationships = append(relationships, DatabaseRelationship{
+					Type:        "generic_relationship",
+					Description: fmt.Sprintf("Potential relationship pattern: %s", line),
+				})
+			}
+		}
+	}
+
+	return relationships
+}
+
+// Helper functions for relationship extraction
+
+// buildDeterministicEdges creates graph edges from parsed relationships
+func (s *Scanner) buildDeterministicEdges(ctx context.Context) {
+	_ = ctx // Acknowledge context for future use
+
+	// Build edges from import/dependency relationships
+	for _, node := range s.graph.Nodes {
+		if node.Type == types.NodeTypeCode {
+			for _, dep := range node.Dependencies {
+				// Find dependency node
+				for _, depNode := range s.graph.Nodes {
+					if depNode.Type == types.NodeTypeLibrary && strings.Contains(depNode.Name, dep) {
+						edge := &types.Edge{
+							From:         node.ID,
+							To:           depNode.ID,
+							Relationship: "imports",
+							Strength:     1.0,
+							Metadata: map[string]interface{}{
+								"type": "dependency",
+							},
+						}
+						s.graph.Edges = append(s.graph.Edges, edge)
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// Build edges from database relationships
+	for _, node := range s.graph.Nodes {
+		if node.Type == types.NodeTypeDatabase {
+			if relationships, ok := node.Metadata["relationships"].([]DatabaseRelationship); ok {
+				for _, rel := range relationships {
+					// Create edge based on relationship type
+					edge := &types.Edge{
+						From:         node.ID,
+						To:           s.generateNodeID(rel.ToTable), // Target table node
+						Relationship: rel.Type,
+						Strength:     1.0,
+						Metadata: map[string]interface{}{
+							"type":        "database_relationship",
+							"column":      rel.Column,
+							"description": rel.Description,
+						},
+					}
+					s.graph.Edges = append(s.graph.Edges, edge)
+				}
+			}
+		}
+	}
+
+	log.Printf("  🕸️  Created %d deterministic edges", len(s.graph.Edges))
+}
+
+func (s *Scanner) extractFieldName(lines []string, currentLine int) string {
+	// Look backwards for field name
+	for i := currentLine; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if strings.Contains(line, "struct") || strings.Contains(line, "class") {
+			break
+		}
+		parts := strings.Fields(line)
+		if len(parts) >= 2 {
+			return parts[0] // First word is usually the field name
+		}
+	}
+	return "unknown_field"
+}
+
+func (s *Scanner) extractClassName(lines []string, currentLine int) string {
+	// Look backwards for class/struct name
+	for i := currentLine; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if strings.Contains(line, "class ") {
+			parts := strings.Split(line, "class ")
+			if len(parts) > 1 {
+				className := strings.Fields(parts[1])[0]
+				return className
+			}
+		}
+		if strings.Contains(line, "type ") && strings.Contains(line, "struct") {
+			parts := strings.Split(line, "type ")
+			if len(parts) > 1 {
+				typeName := strings.Fields(parts[1])[0]
+				return typeName
+			}
+		}
+	}
+	return "unknown_class"
 }
 
 // getProtocolName converts connection type number to protocol name

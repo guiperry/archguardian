@@ -12,27 +12,27 @@ ArchGuardian is a GoLang-based autonomous system that provides deep visibility i
 
 ## 🎯 What ArchGuardian Does
 
-ArchGuardian performs three core functions flawlessly:
+ArchGuardian performs three core functions with a deterministic, reliable architecture:
 
-### 1. **Understands Your System**
-Creates a **real-time knowledge graph** showing how every component connects—code, APIs, databases, services, and data flows across your entire stack.
+### 1. **Understands Your System (Deterministic Scanning)**
+Creates a **real-time knowledge graph** showing how every component connects—code, APIs, databases, services, and data flows across your entire stack using **static analysis, AST parsing, and pattern matching**. Scans are fast, reproducible, and work offline.
 
-### 2. **Diagnoses Hidden Risks**
-Surfaces technical debt, security vulnerabilities, obsolete code, and dangerous dependencies **before they become critical failures**.
+### 2. **Diagnoses Hidden Risks (Rule-Based Detection)**
+Surfaces technical debt, security vulnerabilities, obsolete code, and dangerous dependencies **before they become critical failures** using **deterministic detection rules, CVE databases, and pattern matching**. Every scan produces identical results.
 
-### 3. **Automates the Fixes**
-AI generates and executes fixes—updating libraries, removing dead code, patching vulnerabilities, and preventing new debt from accumulating.
+### 3. **AI-Powered Remediation (On-Demand)**
+When you select an issue, **AI generates intelligent fix recommendations**. You review the proposed solution, approve it, and ArchGuardian applies the fix. AI is only used for generating solutions, never for scanning or detection.
 
 ---
 
 ## ✨ Key Features
 
-### 🤖 **AI-Driven Remediation & Maintenance**
+### 🤖 **AI-Powered Remediation (User-Triggered)**
 - **Multi-Provider AI Support**: Cerebras, Google Gemini, Anthropic Claude, OpenAI, DeepSeek
 - **Intelligent Context Management**: Maintains conversation history and project context
-- **Automated Code Fixes**: Generates and applies patches for detected issues
+- **On-Demand Solution Generation**: AI generates fixes only when you request them
 - **Smart Dependency Updates**: Analyzes breaking changes before updating libraries
-- **Dead Code Removal**: Identifies and safely removes unused code paths
+- **Review-Before-Apply Workflow**: You review and approve all AI-generated solutions
 
 ### 🕸️ **Real-Time Knowledge Graph**
 - **Dynamic Architecture Mapping**: Visualizes code structure, dependencies, and data flows
@@ -41,19 +41,21 @@ AI generates and executes fixes—updating libraries, removing dead code, patchi
 - **Semantic Search**: Natural language queries over architecture data
 - **Historical Tracking**: Compare architecture changes over time
 
-### 🔍 **Static + Runtime Code Scanning**
-- **Go AST Analysis**: Deep parsing of Go source code structure
-- **Dependency Graph Construction**: Maps all import relationships
-- **Test Coverage Analysis**: Identifies untested code paths
-- **Security Vulnerability Detection**: Scans for common security issues
-- **Code Quality Metrics**: Cyclomatic complexity, code smells, anti-patterns
+### 🔍 **Deterministic Static + Runtime Scanning**
+- **Go AST Analysis**: Deep parsing of Go source code structure (no AI)
+- **Dependency Graph Construction**: Maps all import relationships deterministically
+- **Test Coverage Analysis**: Identifies untested code paths via coverage tools
+- **Security Vulnerability Detection**: Pattern-based detection + CVE database lookups
+- **Code Quality Metrics**: Cyclomatic complexity calculation, rule-based code smell detection
 - **Web Baseline Compatibility Checker**: Validates CSS, JavaScript, and HTML features against web standards
+- **100% Reproducible**: Same codebase always produces identical scan results
+- **Offline Capable**: Scans work without internet connectivity (except CVE updates)
 
-### 🗄️ **Full Database Model Analysis**
-- **Schema Extraction**: Analyzes database structures and relationships
-- **Query Pattern Detection**: Identifies inefficient database access patterns
-- **Migration Risk Assessment**: Evaluates impact of schema changes
-- **Data Flow Tracking**: Maps data movement across the system
+### 🗄️ **Deterministic Database Model Analysis**
+- **Schema Extraction**: Parses ORM models and database schemas deterministically
+- **Query Pattern Detection**: Identifies inefficient database access patterns via static analysis
+- **Migration Risk Assessment**: Evaluates impact of schema changes using rule-based analysis
+- **Data Flow Tracking**: Maps data movement across the system via AST parsing
 
 ### 🔬 **Runtime Inspection Capabilities**
 - **Real-Time System Metrics**: CPU, memory, disk, network monitoring
@@ -149,7 +151,7 @@ graph TB
     ScanAPI --> Scanner
     Scanner --> RiskDiag
     Scanner --> DataEngine
-    RiskDiag --> AIEngine
+    RiskDiag -.->|User-Triggered Only| AIEngine
     DataAPI --> DataEngine
     AuthAPI --> AuthSvc
     MonitorAPI --> DataEngine
@@ -157,15 +159,15 @@ graph TB
     SearchAPI --> ChromemDB
     LogAPI --> DataEngine
     
-    Scanner --> ChromemDB
-    RiskDiag --> ChromemDB
+    Scanner -->|Deterministic Results| ChromemDB
+    RiskDiag -->|Detected Issues| ChromemDB
     DataEngine --> ChromemDB
     AuthSvc --> FileStore
     
     AuthSvc --> GitHub
     DataEngine -.->|Optional| Kafka
     DataEngine -.->|Optional| ChromaDB
-    AIEngine --> AIProviders
+    AIEngine -.->|On-Demand Only| AIProviders
     
     WS -.->|Real-time Updates| Browser
     
@@ -208,14 +210,18 @@ graph TB
 │  │                                                          │  │
 │  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────┐ │  │
 │  │  │ Scanner  │  │   Risk   │  │    AI    │  │  Data   │ │  │
-│  │  │ (AST)    │→ │ Diagnoser│→ │ Inference│  │ Engine  │ │  │
+│  │  │ (AST)    │→ │ Diagnoser│  │Remediation│ │ Engine  │ │  │
+│  │  │Determ.   │  │Determ.   │  │User-Trig. │  │         │ │  │
 │  │  └──────────┘  └──────────┘  └──────────┘  └─────────┘ │  │
+│  │       │              │              ↑            │       │  │
 │  │       │              │              │            │       │  │
-│  └───────┼──────────────┼──────────────┼────────────┼───────┘  │
-│          │              │              │            │           │
-└──────────┼──────────────┼──────────────┼────────────┼───────────┘
-           │              │              │            │
-           └──────────────┴──────────────┴────────────┘
+│  │       │              └──────────────┘            │       │  │
+│  │       │           (User selects issue)           │       │  │
+│  └───────┼──────────────┼──────────────────────────┼───────┘  │
+│          │              │                           │           │
+└──────────┼──────────────┼───────────────────────────┼───────────┘
+           │              │                           │
+           └──────────────┴───────────────────────────┘
                               │
            ┌──────────────────▼──────────────────┐
            │    Chromem-go Vector Database       │
@@ -256,28 +262,32 @@ graph TB
 - **API Gateway** - Routes to all internal services
 
 #### **Scanner** (`internal/scanner/`)
-- **Go AST Parsing** - Deep source code analysis
-- **Dependency Graph** - Import relationship mapping
-- **Test Coverage** - Coverage report generation
-- **Knowledge Graph** - Architecture visualization data
-- **File System Analysis** - Project structure scanning
-- **Web Baseline Checker** - CSS/JS/HTML compatibility validation
+- **Go AST Parsing** - Deep source code analysis (deterministic)
+- **Dependency Graph** - Import relationship mapping (deterministic)
+- **Test Coverage** - Coverage report generation (deterministic)
+- **Knowledge Graph** - Architecture visualization data (deterministic)
+- **File System Analysis** - Project structure scanning (deterministic)
+- **Web Baseline Checker** - CSS/JS/HTML compatibility validation (deterministic)
+- **No AI Inference** - All scanning is rule-based and reproducible
 
 #### **Risk Diagnoser** (`internal/risk/`)
-- **Security Vulnerability Detection** - SQL injection, XSS, etc.
-- **Code Quality Analysis** - Cyclomatic complexity, code smells
-- **Technical Debt Identification** - Deprecated code, TODOs
-- **Compatibility Analysis** - Browser compatibility warnings
-- **Risk Scoring** - Priority-based issue ranking
-- **Remediation Suggestions** - AI-powered fix recommendations
+- **Security Vulnerability Detection** - Pattern matching for SQL injection, XSS, etc. (deterministic)
+- **Code Quality Analysis** - Cyclomatic complexity calculation, rule-based code smell detection (deterministic)
+- **Technical Debt Identification** - Deprecated code detection, TODO extraction (deterministic)
+- **Compatibility Analysis** - Browser compatibility warnings (deterministic)
+- **Risk Scoring** - Priority-based issue ranking (deterministic)
+- **CVE Database Lookups** - Dependency vulnerability checking via external databases
+- **No AI Inference** - All detection is pattern-based and reproducible
 
-#### **AI Inference Engine** (`inference_engine/`)
+#### **AI Remediation Service** (`inference_engine/`)
+- **User-Triggered Only** - AI is invoked only when user requests a solution
 - **Multi-Provider Orchestration** - Cerebras, Gemini, Claude, OpenAI, DeepSeek
 - **Context Management** - Maintains conversation history
-- **Code Analysis** - AI-powered code understanding
-- **Automated Remediation** - Generates and applies fixes
+- **Solution Generation** - AI generates fix recommendations for detected issues
+- **Review Workflow** - User reviews and approves solutions before application
 - **Conversation Memory** - Persistent chat history
 - **Provider Fallback** - Automatic failover between AI providers
+- **Separate from Scanning** - AI never runs during the scanning phase
 
 #### **Data Engine** (`data_engine/`)
 - **Real-time Metrics Collection** - CPU, memory, disk, network
@@ -871,7 +881,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📞 Support
 
-- **Disclosure**: [Vulnerability Disclosure](https://github.com/guiperry/archguardian/VULNERABILITY_DISCLOSURE_POLICY.md)
+- **Disclosure**: [Vulnerability Disclosure](https://github.com/guiperry/archguardian/wiki/VULNERABILITY_DISCLOSURE_POLICY.md)
 - **Documentation**: [Full documentation](https://github.com/guiperry/archguardian/wiki)
 - **Issues**: [GitHub Issues](https://github.com/guiperry/archguardian/issues)
 

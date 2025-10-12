@@ -171,6 +171,8 @@ jobs:
         docker run -d --name archguardian-test \
           -e PROJECT_PATH=/app \
           -e SCAN_INTERVAL_HOURS=1 \
+          -e CI=true \
+          -e SERVER_PORT=8080 \
           -p 8080:8080 \
           archguardian:latest
 

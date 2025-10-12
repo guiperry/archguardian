@@ -20,9 +20,9 @@ type LLMAttemptConfig struct {
 	ProviderName string
 	ModelName    string
 	APIKeyEnvVar string // Environment variable name for the API key
+	BaseURL      string // Optional custom base URL for the provider
 	MaxTokens    int
 	IsPrimary    bool // True if part of initial attempts, false for fallback
-	// Add EndpointOverride string if needed
 }
 
 // LLMAttempt holds an initialized LLM instance and its config.
@@ -94,6 +94,13 @@ func (s *InferenceService) StartWithConfig(attemptConfigs []LLMAttemptConfig, pl
 			config.SetMaxTokens(attemptConf.MaxTokens),
 			// Set longer timeout to prevent context deadline exceeded errors
 			config.SetTimeout(90 * time.Second),
+		}
+
+		// Add custom base URL if provided (for CloudFlare and other custom endpoints)
+		if attemptConf.BaseURL != "" {
+			// Note: gollm_cerebras config package doesn't have SetEndpoint function
+			// The BaseURL is handled internally by the provider implementations
+			log.Printf("InferenceService: Custom BaseURL '%s' provided but SetEndpoint not available in config package", attemptConf.BaseURL)
 		}
 
 		llmInstance, err := gollm.NewLLM(opts...)

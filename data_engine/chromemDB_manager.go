@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -638,6 +639,262 @@ func createLocalEmbeddings(texts []string) ([][]float64, error) {
 
 	log.Printf("✅ Generated local embeddings for %d texts", len(texts))
 	return embeddings, nil
+}
+
+// queryWithFallback performs a query with progressive fallback for ChromemDB limitations
+func (m *ChromemManager) queryWithFallback(collection *chromem.Collection, searchTerm string) ([]chromem.Result, error) {
+	// Try progressively smaller limits until one works
+	limits := []int{10, 5, 3, 1}
+
+	for _, limit := range limits {
+		results, err := collection.Query(
+			context.Background(),
+			searchTerm,
+			limit,
+			nil, // No where clause - causes errors with chromem-go
+			nil,
+		)
+
+		if err == nil {
+			return results, nil
+		}
+
+		// If it's an nResults error, try smaller limit
+		if strings.Contains(err.Error(), "nResults") {
+			continue
+		}
+
+		// Other errors are not recoverable
+		return nil, err
+	}
+
+	return nil, fmt.Errorf("all query attempts failed")
+}
+
+// GetIssueByID retrieves a specific issue by ID from the risk assessment collection
+func (m *ChromemManager) GetIssueByID(issueID string) (interface{}, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// Query with generic term to get risk items
+	results, err := m.queryWithFallback(m.riskCollection, "risk")
+	if err != nil {
+		return nil, fmt.Errorf("failed to query risk collection: %w", err)
+	}
+
+	// Manual filtering for exact ID match
+	for _, result := range results {
+		riskData, ok := result.Metadata["risk_data"]
+		if !ok {
+			continue
+		}
+
+		// Try to unmarshal as different issue types to find the matching ID
+		if tdItem := m.tryParseAsTechnicalDebt(riskData, issueID); tdItem != nil {
+			return tdItem, nil
+		}
+		if secVuln := m.tryParseAsSecurityVuln(riskData, issueID); secVuln != nil {
+			return secVuln, nil
+		}
+		if obsCode := m.tryParseAsObsoleteCode(riskData, issueID); obsCode != nil {
+			return obsCode, nil
+		}
+		if depRisk := m.tryParseAsDependencyRisk(riskData, issueID); depRisk != nil {
+			return depRisk, nil
+		}
+	}
+
+	return nil, fmt.Errorf("issue with ID %s not found", issueID)
+}
+
+// GetIssuesByType retrieves all issues of a specific type
+func (m *ChromemManager) GetIssuesByType(issueType string) ([]interface{}, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// Map issue type to risk_type metadata value
+	var riskType string
+	switch issueType {
+	case "technical_debt":
+		riskType = "technical_debt"
+	case "security_vulnerability":
+		riskType = "security"
+	case "obsolete_code":
+		riskType = "obsolete_code"
+	case "dependency_risk":
+		riskType = "dependency"
+	case "compatibility":
+		riskType = "compatibility"
+	default:
+		return nil, fmt.Errorf("unsupported issue type: %s", issueType)
+	}
+
+	// Query with generic term to get risk items
+	results, err := m.queryWithFallback(m.riskCollection, "risk")
+	if err != nil {
+		return nil, fmt.Errorf("failed to query risk collection: %w", err)
+	}
+
+	var issues []interface{}
+
+	// Manual filtering for type match
+	for _, result := range results {
+		resultRiskType, ok := result.Metadata["risk_type"]
+		if !ok || resultRiskType != riskType {
+			continue
+		}
+
+		riskData, ok := result.Metadata["risk_data"]
+		if !ok {
+			continue
+		}
+
+		// Parse based on type
+		var issue interface{}
+		switch riskType {
+		case "technical_debt":
+			var item types.TechnicalDebtItem
+			if err := json.Unmarshal([]byte(riskData), &item); err == nil {
+				issue = &item
+			}
+		case "security":
+			var item types.SecurityVulnerability
+			if err := json.Unmarshal([]byte(riskData), &item); err == nil {
+				issue = &item
+			}
+		case "obsolete_code":
+			var item types.ObsoleteCodeItem
+			if err := json.Unmarshal([]byte(riskData), &item); err == nil {
+				issue = &item
+			}
+		case "dependency":
+			var item types.DependencyRisk
+			if err := json.Unmarshal([]byte(riskData), &item); err == nil {
+				issue = &item
+			}
+		case "compatibility":
+			var item types.TechnicalDebtItem
+			if err := json.Unmarshal([]byte(riskData), &item); err == nil {
+				issue = &item
+			}
+		}
+
+		if issue != nil {
+			issues = append(issues, issue)
+		}
+	}
+
+	return issues, nil
+}
+
+// Helper methods for parsing different issue types
+
+func (m *ChromemManager) tryParseAsTechnicalDebt(riskData string, targetID string) *types.TechnicalDebtItem {
+	var item types.TechnicalDebtItem
+	if err := json.Unmarshal([]byte(riskData), &item); err != nil {
+		return nil
+	}
+	if item.ID == targetID {
+		return &item
+	}
+	return nil
+}
+
+func (m *ChromemManager) tryParseAsSecurityVuln(riskData string, targetID string) *types.SecurityVulnerability {
+	var item types.SecurityVulnerability
+	if err := json.Unmarshal([]byte(riskData), &item); err != nil {
+		return nil
+	}
+	if item.ID == targetID || item.CVE == targetID {
+		return &item
+	}
+	return nil
+}
+
+func (m *ChromemManager) tryParseAsObsoleteCode(riskData string, targetID string) *types.ObsoleteCodeItem {
+	var item types.ObsoleteCodeItem
+	if err := json.Unmarshal([]byte(riskData), &item); err != nil {
+		return nil
+	}
+	if item.ID == targetID {
+		return &item
+	}
+	return nil
+}
+
+func (m *ChromemManager) tryParseAsDependencyRisk(riskData string, targetID string) *types.DependencyRisk {
+	var item types.DependencyRisk
+	if err := json.Unmarshal([]byte(riskData), &item); err != nil {
+		return nil
+	}
+	if item.ID == targetID {
+		return &item
+	}
+	return nil
+}
+
+// GetCodeContext retrieves code context for a given file path and line number
+func (m *ChromemManager) GetCodeContext(filePath string, lineNumber int, contextLines int) (string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// Query nodes collection for the specific file
+	results, err := m.queryWithFallback(m.nodeCollection, filePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to query nodes collection: %w", err)
+	}
+
+	// Find the matching file node
+	for _, result := range results {
+		nodePath, ok := result.Metadata["path"]
+		if !ok || nodePath != filePath {
+			continue
+		}
+
+		nodeData, ok := result.Metadata["node_data"]
+		if !ok {
+			continue
+		}
+
+		var node types.Node
+		if err := json.Unmarshal([]byte(nodeData), &node); err != nil {
+			continue
+		}
+
+		// Read the actual file to get code context
+		return m.extractCodeSnippet(filePath, lineNumber, contextLines)
+	}
+
+	return "", fmt.Errorf("file %s not found in knowledge graph", filePath)
+}
+
+// extractCodeSnippet reads a code snippet from a file around a specific line
+func (m *ChromemManager) extractCodeSnippet(filePath string, lineNumber int, contextLines int) (string, error) {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read file %s: %w", filePath, err)
+	}
+
+	lines := strings.Split(string(content), "\n")
+	totalLines := len(lines)
+
+	// Validate line number
+	if lineNumber < 1 || lineNumber > totalLines {
+		return "", fmt.Errorf("line number %d is out of range for file %s", lineNumber, filePath)
+	}
+
+	// Calculate start and end lines with context
+	startLine := max(1, lineNumber-contextLines)
+	endLine := min(totalLines, lineNumber+contextLines)
+
+	// Extract the snippet
+	var snippetLines []string
+	for i := startLine - 1; i < endLine; i++ {
+		snippetLines = append(snippetLines, fmt.Sprintf("%d: %s", i+1, lines[i]))
+	}
+
+	return fmt.Sprintf("Code snippet from %s (lines %d-%d):\n%s",
+		filePath, startLine, endLine, strings.Join(snippetLines, "\n")), nil
 }
 
 // stringifyMetadata converts map[string]interface{} to map[string]string for chromem-go.
