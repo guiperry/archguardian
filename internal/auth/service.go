@@ -89,6 +89,9 @@ func (as *AuthService) CreateOrUpdateUser(githubUser map[string]interface{}) *Us
 	userID := fmt.Sprintf("%v", githubUser["id"])
 	now := time.Now()
 
+	as.mutex.Lock()
+	defer as.mutex.Unlock()
+
 	user, exists := as.users[userID]
 	if !exists {
 		user = &User{
@@ -109,6 +112,8 @@ func (as *AuthService) CreateOrUpdateUser(githubUser map[string]interface{}) *Us
 
 // StoreGitHubToken stores a GitHub token for a user
 func (as *AuthService) StoreGitHubToken(userID string, auth *GitHubAuth) {
+	as.mutex.Lock()
+	defer as.mutex.Unlock()
 	as.tokens[userID] = auth
 }
 

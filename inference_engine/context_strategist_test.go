@@ -130,7 +130,15 @@ func TestDecideStrategy_Orchestration(t *testing.T) {
 			// Arrange
 			mockOrchestrator := &mockTaskOrchestrator{}
 			strategist := NewContextStrategist(mockOrchestrator, ChunkByTokenCount)
-			mockLLM := &mockTextGenerator{}
+			mockLLM := &mockTextGenerator{
+				GenerateTextFunc: func(prompt string) (string, error) {
+					// Return "orchestration" for classification prompts
+					if strings.Contains(prompt, "Analyze the following user request and classify its intent") {
+						return "orchestration", nil
+					}
+					return "mock generation result", nil
+				},
+			}
 			ctx := context.Background()
 
 			// Act
@@ -150,6 +158,10 @@ func TestDecideStrategy_Compaction(t *testing.T) {
 	strategist := NewContextStrategist(mockOrchestrator, ChunkByTokenCount, WithProcessingMode(ParallelProcessing)) // Use parallel for simpler test
 	mockLLM := &mockTextGenerator{
 		GenerateTextFunc: func(prompt string) (string, error) {
+			// Return "compaction" for classification prompts
+			if strings.Contains(prompt, "Analyze the following user request and classify its intent") {
+				return "compaction", nil
+			}
 			return fmt.Sprintf("compacted: %s", prompt), nil
 		},
 	}

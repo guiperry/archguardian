@@ -24,15 +24,21 @@ import (
 	"github.com/shirou/gopsutil/v4/process"
 )
 
+// ChromemManager interface for database operations
+type ChromemManager interface {
+	UpsertNode(node *types.Node) error
+}
+
 // Scanner handles comprehensive code scanning operations
 type Scanner struct {
-	config *config.Config
-	graph  *types.KnowledgeGraph
-	ai     *inference_engine.InferenceService
+	config         *config.Config
+	graph          *types.KnowledgeGraph
+	ai             *inference_engine.InferenceService
+	chromemManager ChromemManager
 }
 
 // NewScanner creates a new scanner instance
-func NewScanner(cfg *config.Config, ai *inference_engine.InferenceService) *Scanner {
+func NewScanner(cfg *config.Config, ai *inference_engine.InferenceService, chromemManager ChromemManager) *Scanner {
 	return &Scanner{
 		config: cfg,
 		graph: &types.KnowledgeGraph{
@@ -41,7 +47,8 @@ func NewScanner(cfg *config.Config, ai *inference_engine.InferenceService) *Scan
 			LastUpdated:   time.Now(),
 			AnalysisDepth: 1,
 		},
-		ai: ai,
+		ai:             ai,
+		chromemManager: chromemManager,
 	}
 }
 
@@ -147,6 +154,9 @@ func (s *Scanner) scanStaticCode(ctx context.Context) error {
 			}
 
 			s.graph.Nodes[node.ID] = node
+
+			// Persist node to database immediately for real-time dashboard updates
+			s.persistNodeToDatabase(node)
 		}
 
 		return nil
@@ -209,6 +219,7 @@ func (s *Scanner) scanGoMod() error {
 					},
 				}
 				s.graph.Nodes[node.ID] = node
+				s.persistNodeToDatabase(node)
 			}
 		}
 	}
@@ -242,6 +253,7 @@ func (s *Scanner) scanPackageJSON() error {
 				},
 			}
 			s.graph.Nodes[node.ID] = node
+			s.persistNodeToDatabase(node)
 		}
 	}
 
@@ -282,6 +294,7 @@ func (s *Scanner) scanRequirementsTxt() error {
 			},
 		}
 		s.graph.Nodes[node.ID] = node
+		s.persistNodeToDatabase(node)
 	}
 
 	return nil
@@ -301,10 +314,12 @@ func (s *Scanner) scanRuntime() error {
 	// Add runtime nodes to knowledge graph
 	for _, node := range processNodes {
 		s.graph.Nodes[node.ID] = node
+		s.persistNodeToDatabase(node)
 	}
 
 	for _, node := range connectionNodes {
 		s.graph.Nodes[node.ID] = node
+		s.persistNodeToDatabase(node)
 	}
 
 	log.Printf("  📊 Runtime scan complete: %d processes, %d connections",
@@ -367,6 +382,9 @@ func (s *Scanner) scanDatabaseModels(ctx context.Context) error {
 
 			// Add node to graph (with or without AI analysis)
 			s.graph.Nodes[node.ID] = node
+
+			// Persist node to database immediately
+			s.persistNodeToDatabase(node)
 		}
 	}
 
@@ -398,6 +416,9 @@ func (s *Scanner) scanAPIs(ctx context.Context) error {
 				Metadata: make(map[string]interface{}),
 			}
 			s.graph.Nodes[node.ID] = node
+
+			// Persist node to database immediately
+			s.persistNodeToDatabase(node)
 		}
 	}
 
@@ -1044,6 +1065,15 @@ func (s *Scanner) readFileSafely(filePath string) ([]byte, error) {
 // GetKnowledgeGraph returns the current knowledge graph
 func (s *Scanner) GetKnowledgeGraph() *types.KnowledgeGraph {
 	return s.graph
+}
+
+// persistNodeToDatabase persists a node to the database for real-time dashboard updates
+func (s *Scanner) persistNodeToDatabase(node *types.Node) {
+	if s.chromemManager != nil {
+		if err := s.chromemManager.UpsertNode(node); err != nil {
+			log.Printf("  ⚠️  Failed to persist node %s to database: %v", node.ID, err)
+		}
+	}
 }
 
 // RuntimeScanner handles runtime system inspection

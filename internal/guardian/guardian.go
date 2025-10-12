@@ -378,7 +378,7 @@ func NewArchGuardian(config *config.Config, aiEngine *inference_engine.Inference
 	}
 
 	// Initialize scanner
-	scannerInstance := scanner.NewScanner(config, aiEngine)
+	scannerInstance := scanner.NewScanner(config, aiEngine, chromemManager)
 	log.Println("✅ Scanner initialized successfully")
 
 	// Initialize risk diagnoser
