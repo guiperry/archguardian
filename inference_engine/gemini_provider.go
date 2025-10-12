@@ -19,6 +19,7 @@ import (
 	// "google.golang.org/api/option" // REMOVE unused import
 
 	"os" // Import os package
+
 	"github.com/guiperry/gollm_cerebras/config"
 	"github.com/guiperry/gollm_cerebras/providers"
 	"github.com/guiperry/gollm_cerebras/types"
@@ -45,7 +46,7 @@ type GeminiProvider struct {
 type GeminiRequest struct {
 	Contents         []GeminiContent         `json:"contents"`
 	GenerationConfig *GeminiGenerationConfig `json:"generationConfig,omitempty"`
-	Stream           bool                     `json:"stream,omitempty"`
+	Stream           bool                    `json:"stream,omitempty"`
 	// SafetySettings, Tools, etc. can be added here if needed
 }
 
@@ -105,14 +106,14 @@ func NewGeminiProvider(apiKey, model string, extraHeaders map[string]string) pro
 		maxTokens:    1024,
 		extraHeaders: make(map[string]string),
 		client: &http.Client{
-			Timeout: 120 * time.Second, // Set timeout (e.g., 120 seconds)
+			Timeout: 300 * time.Second, // Set timeout to 5 minutes for large requests
 		}, // Initialize standard HTTP client
 		logger: utils.NewLogger(utils.LogLevelInfo),
 	}
 
 	// Set default model if provided one is empty
 	if provider.model == "" {
-		provider.model = "gemini-1.5-flash-latest" // Use the known working model name
+		provider.model = "gemini-2.5-flash" // Use the current stable model
 		log.Printf("Gemini model defaulting to %s", provider.model)
 	}
 
@@ -124,8 +125,8 @@ func NewGeminiProvider(apiKey, model string, extraHeaders map[string]string) pro
 	// --- Read Endpoint from Environment Variable ---
 	apiEndpoint := os.Getenv("GEMINI_API_ENDPOINT")
 	if apiEndpoint == "" {
-		// Default to the v1beta base path as it's commonly needed
-		apiEndpoint = "https://generativelanguage.googleapis.com/v1beta/"
+		// Default to the v1 stable API path
+		apiEndpoint = "https://generativelanguage.googleapis.com/v1/"
 		log.Println("GeminiProvider: GEMINI_API_ENDPOINT not set, using default:", apiEndpoint)
 	} else {
 		log.Println("GeminiProvider: Using endpoint from GEMINI_API_ENDPOINT:", apiEndpoint)

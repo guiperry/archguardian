@@ -45,30 +45,6 @@ func NewScanner(cfg *config.Config, ai *inference_engine.InferenceService) *Scan
 	}
 }
 
-// getProjectID returns the project ID for data isolation
-func (s *Scanner) getProjectID() string {
-	// For now, derive project ID from the project path
-	// In a more sophisticated implementation, this could come from:
-	// - A project configuration file
-	// - Git repository information
-	// - User-specified project ID
-	if s.config.ProjectPath != "" && s.config.ProjectPath != "." {
-		// Create a simple hash of the project path for uniqueness
-		hash := 0
-		for _, char := range s.config.ProjectPath {
-			hash = (hash*31 + int(char)) % 1000000
-		}
-		projectID := fmt.Sprintf("project_%d", hash)
-
-		// Log the project ID for debugging
-		log.Printf("🔍 Generated project ID: %s for path: %s", projectID, s.config.ProjectPath)
-		return projectID
-	}
-
-	// Default fallback
-	return "default"
-}
-
 // ScanProject performs a comprehensive project scan with 7 phases
 func (s *Scanner) ScanProject(ctx context.Context) error {
 	log.Println("🔍 Starting comprehensive project scan...")
@@ -79,7 +55,7 @@ func (s *Scanner) ScanProject(ctx context.Context) error {
 	}
 
 	// Phase 2: Dependency Analysis
-	if err := s.scanDependencies(ctx); err != nil {
+	if err := s.scanDependencies(); err != nil {
 		return fmt.Errorf("dependency scan failed: %w", err)
 	}
 
@@ -150,11 +126,22 @@ func (s *Scanner) scanStaticCode(ctx context.Context) error {
 				dependencies := s.parseFileDependencies(path, content)
 				node.Dependencies = dependencies
 
-				// Use AI for quick analysis if available
+				// Use AI for analysis if available - context strategist will handle large files via chunking
 				if s.ai != nil && s.ai.IsRunning() {
-					analysis, err := s.ai.GenerateText(ctx, "cerebras", fmt.Sprintf("Analyze this code file for complexity and quality:\n\n%s", string(content)), "")
-					if err == nil && analysis != "" {
+					// Create a timeout context for AI analysis
+					// Timeout is generous to allow for chunking of large files
+					// The context strategist will automatically chunk files that exceed token limits
+					aiCtx, aiCancel := context.WithTimeout(ctx, 2*time.Minute)
+					defer aiCancel()
+
+					log.Printf("  🔍 Analyzing %s (%d bytes) with AI...", filepath.Base(path), info.Size())
+					analysis, err := s.ai.GenerateText(aiCtx, "gemini-2.5-flash", fmt.Sprintf("Analyze this code file for complexity and quality:\n\n%s", string(content)), "")
+					if err != nil {
+						// Log warning but continue - AI analysis is optional
+						log.Printf("  ⚠️  AI analysis failed for %s: %v", filepath.Base(path), err)
+					} else if analysis != "" {
 						node.Metadata["ai_analysis"] = analysis
+						log.Printf("  ✅ AI analysis completed for %s", filepath.Base(path))
 					}
 				}
 			}
@@ -169,7 +156,7 @@ func (s *Scanner) scanStaticCode(ctx context.Context) error {
 }
 
 // scanDependencies scans for project dependencies
-func (s *Scanner) scanDependencies(ctx context.Context) error {
+func (s *Scanner) scanDependencies() error {
 	log.Println("  📦 Scanning dependencies...")
 
 	// Scan go.mod
@@ -179,12 +166,12 @@ func (s *Scanner) scanDependencies(ctx context.Context) error {
 
 	// Scan package.json
 	if _, err := os.Stat(filepath.Join(s.config.ProjectPath, "package.json")); err == nil {
-		return s.scanPackageJSON(ctx)
+		return s.scanPackageJSON()
 	}
 
 	// Scan requirements.txt
 	if _, err := os.Stat(filepath.Join(s.config.ProjectPath, "requirements.txt")); err == nil {
-		return s.scanRequirementsTxt(ctx)
+		return s.scanRequirementsTxt()
 	}
 
 	return nil
@@ -230,7 +217,7 @@ func (s *Scanner) scanGoMod() error {
 }
 
 // scanPackageJSON scans package.json for dependencies
-func (s *Scanner) scanPackageJSON(ctx context.Context) error {
+func (s *Scanner) scanPackageJSON() error {
 	content, err := s.readFileSafely(filepath.Join(s.config.ProjectPath, "package.json"))
 	if err != nil {
 		return fmt.Errorf("failed to read package.json file: %w", err)
@@ -262,7 +249,7 @@ func (s *Scanner) scanPackageJSON(ctx context.Context) error {
 }
 
 // scanRequirementsTxt scans requirements.txt for Python dependencies
-func (s *Scanner) scanRequirementsTxt(ctx context.Context) error {
+func (s *Scanner) scanRequirementsTxt() error {
 	reqPath := filepath.Join(s.config.ProjectPath, "requirements.txt")
 
 	content, err := s.readFileSafely(reqPath)
@@ -345,32 +332,41 @@ func (s *Scanner) scanDatabaseModels(ctx context.Context) error {
 				continue
 			}
 
-			// Use AI for deep analysis of database models if available
-			if s.ai != nil && s.ai.IsRunning() {
-				analysis, err := s.ai.GenerateText(ctx, "gemini", fmt.Sprintf("Analyze this database model for structure and relationships:\n\n%s", string(content)), "")
-				if err == nil && analysis != "" {
-					node := &types.Node{
-						ID:   s.generateNodeID(path),
-						Type: types.NodeTypeDatabase,
-						Name: filepath.Base(path),
-						Path: path,
-						Metadata: map[string]interface{}{
-							"analysis": analysis,
-						},
-					}
-					s.graph.Nodes[node.ID] = node
-				}
-			} else {
-				// Fallback without AI
-				node := &types.Node{
-					ID:       s.generateNodeID(path),
-					Type:     types.NodeTypeDatabase,
-					Name:     filepath.Base(path),
-					Path:     path,
-					Metadata: make(map[string]interface{}),
-				}
-				s.graph.Nodes[node.ID] = node
+			// Get file info for size check
+			fileInfo, err := os.Stat(path)
+			if err != nil {
+				continue
 			}
+
+			// Create node structure
+			node := &types.Node{
+				ID:       s.generateNodeID(path),
+				Type:     types.NodeTypeDatabase,
+				Name:     filepath.Base(path),
+				Path:     path,
+				Metadata: make(map[string]interface{}),
+			}
+
+			// Use AI for deep analysis of database models if available
+			// Context strategist will handle large files via chunking
+			if s.ai != nil && s.ai.IsRunning() {
+				// Create a timeout context for AI analysis
+				// Timeout is generous to allow for chunking of large files
+				aiCtx, aiCancel := context.WithTimeout(ctx, 2*time.Minute)
+				defer aiCancel()
+
+				log.Printf("  🔍 Analyzing database model %s (%d bytes) with AI...", filepath.Base(path), fileInfo.Size())
+				analysis, err := s.ai.GenerateText(aiCtx, "gemini-2.5-flash", fmt.Sprintf("Analyze this database model for structure and relationships:\n\n%s", string(content)), "")
+				if err != nil {
+					log.Printf("  ⚠️  AI analysis failed for database model %s: %v", filepath.Base(path), err)
+				} else if analysis != "" {
+					node.Metadata["analysis"] = analysis
+					log.Printf("  ✅ AI analysis completed for database model %s", filepath.Base(path))
+				}
+			}
+
+			// Add node to graph (with or without AI analysis)
+			s.graph.Nodes[node.ID] = node
 		}
 	}
 

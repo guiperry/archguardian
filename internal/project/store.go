@@ -63,6 +63,17 @@ func (ps *ProjectStore) GetAll() []*Project {
 	for _, project := range ps.projects {
 		projects = append(projects, project)
 	}
+	log.Printf("📂 GetAll() returning %d projects from memory store", len(projects))
+
+	// Log each project for debugging
+	if len(projects) > 0 {
+		for i, p := range projects {
+			log.Printf("  Project %d: ID=%s, Name=%s, Path=%s, Status=%s", i+1, p.ID, p.Name, p.Path, p.Status)
+		}
+	} else {
+		log.Printf("  ⚠️  No projects in memory store!")
+	}
+
 	return projects
 }
 
@@ -109,6 +120,8 @@ func (ps *ProjectStore) loadProjects() {
 		return
 	}
 
+	log.Printf("📂 Starting project load from database...")
+
 	// Create embedding function for collection operations
 	embeddingFunc := embedding.CreateChromemEmbeddingFunc()
 
@@ -118,37 +131,53 @@ func (ps *ProjectStore) loadProjects() {
 		var err error
 		collection, err = ps.db.GetOrCreateCollection("projects", map[string]string{"type": "project"}, embeddingFunc)
 		if err != nil {
-			log.Printf("⚠️  Failed to create projects collection: %v", err)
+			log.Printf("❌ Failed to create projects collection: %v", err)
 			return
 		}
 		// New collection is empty, no need to query
-		log.Printf("✅ Created new projects collection")
+		log.Printf("✅ Created new projects collection (empty)")
 		return
 	}
+
+	log.Printf("📂 Projects collection found, querying for documents...")
 
 	// Query all projects from database using progressive fallback approach
 	// Note: chromem-go requires nResults to be <= number of documents in collection
 	// We use progressive limits to handle collections of any size
-	results, err := ps.queryWithFallback(collection, "project")
+	// Use wildcard to get all documents
+	results, err := ps.queryWithFallback(collection, "*")
 	if err != nil {
 		// Collection might be empty, which is fine for a new installation
-		log.Printf("✅ Project store initialized (no existing projects)")
+		log.Printf("✅ Project store initialized (no existing projects found: %v)", err)
 		return
 	}
+	log.Printf("📂 Found %d project documents in database", len(results))
 
 	loadedCount := 0
-	for _, result := range results {
+	skippedCount := 0
+	for i, result := range results {
+		log.Printf("📄 Processing document %d/%d (ID: %s)", i+1, len(results), result.ID)
+
+		// Skip deleted projects
+		if deleted, ok := result.Metadata["deleted"]; ok && deleted == "true" {
+			log.Printf("  ⏭️  Skipping deleted project: %s", result.ID)
+			skippedCount++
+			continue
+		}
+
 		var project Project
 		if err := json.Unmarshal([]byte(result.Content), &project); err != nil {
-			log.Printf("⚠️  Failed to parse project data: %v", err)
+			log.Printf("  ⚠️  Failed to parse project data for %s: %v", result.ID, err)
+			skippedCount++
 			continue
 		}
 
 		ps.projects[project.ID] = &project
+		log.Printf("  ✅ Loaded project: %s (Name: %s, Path: %s)", project.ID, project.Name, project.Path)
 		loadedCount++
 	}
 
-	log.Printf("✅ Loaded %d projects from database", loadedCount)
+	log.Printf("✅ Project loading complete: %d loaded, %d skipped, %d total in memory", loadedCount, skippedCount, len(ps.projects))
 }
 
 // queryWithFallback implements progressive query fallback to handle chromem-go's

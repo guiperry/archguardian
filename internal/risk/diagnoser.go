@@ -16,8 +16,8 @@ import (
 // RiskDiagnoser handles risk analysis and diagnosis
 type RiskDiagnoser struct {
 	scanner             *scanner.Scanner
-	aiEngine            types.AIEngineInterface         // AI inference engine for risk analysis
-	codacyClient        types.CodacyClientInterface     // Codacy API client for external analysis
+	aiEngine            types.AIEngineInterface     // AI inference engine for risk analysis
+	codacyClient        types.CodacyClientInterface // Codacy API client for external analysis
 	compatibilityIssues []types.TechnicalDebtItem
 	latestAssessment    *types.RiskAssessment
 	mutex               sync.RWMutex
@@ -213,11 +213,11 @@ func (rd *RiskDiagnoser) getSampleNodes(nodes map[string]*types.Node, maxSamples
 		}
 
 		sample := map[string]interface{}{
-			"id":       node.ID,
-			"type":     string(node.Type),
-			"name":     node.Name,
-			"path":     node.Path,
-			"metadata": node.Metadata,
+			"id":         node.ID,
+			"type":       string(node.Type),
+			"name":       node.Name,
+			"path":       node.Path,
+			"metadata":   node.Metadata,
 			"risk_score": node.RiskScore,
 		}
 		samples = append(samples, sample)
@@ -879,13 +879,13 @@ func (rd *RiskDiagnoser) prepareRisksForAIScoring(assessment *types.RiskAssessme
 	// Add dependency risks
 	for _, dep := range assessment.DangerousDependencies {
 		risks = append(risks, map[string]interface{}{
-			"id":               dep.Package,
-			"type":             "dependency_risk",
-			"category":         "dependency",
-			"severity":         "medium", // Default, will be adjusted by AI
-			"description":      fmt.Sprintf("Risky dependency: %s", dep.Package),
-			"security_issues":  dep.SecurityIssues,
-			"maintenance":      dep.Maintenance,
+			"id":              dep.Package,
+			"type":            "dependency_risk",
+			"category":        "dependency",
+			"severity":        "medium", // Default, will be adjusted by AI
+			"description":     fmt.Sprintf("Risky dependency: %s", dep.Package),
+			"security_issues": dep.SecurityIssues,
+			"maintenance":     dep.Maintenance,
 		})
 	}
 
@@ -951,8 +951,8 @@ func (rd *RiskDiagnoser) prepareAssessmentSummary(assessment *types.RiskAssessme
 func (rd *RiskDiagnoser) summarizeTechnicalDebt(debt []types.TechnicalDebtItem) map[string]interface{} {
 	summary := map[string]interface{}{
 		"total_effort_hours": 0,
-		"by_type":           make(map[string]int),
-		"by_severity":       make(map[string]int),
+		"by_type":            make(map[string]int),
+		"by_severity":        make(map[string]int),
 	}
 
 	for _, item := range debt {

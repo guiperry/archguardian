@@ -27,9 +27,10 @@ func (wsc *wsConnection) WriteMessage(messageType int, data []byte) error {
 
 // WebSocketManager manages WebSocket connections for real-time updates
 type WebSocketManager struct {
-	connections map[*websocket.Conn]*wsConnection
-	mutex       sync.RWMutex
-	upgrader    websocket.Upgrader
+	connections  map[*websocket.Conn]*wsConnection
+	mutex        sync.RWMutex
+	upgrader     websocket.Upgrader
+	archGuardian *guardian.ArchGuardian // Reference to ArchGuardian for delegating broadcasts
 }
 
 // WSMessage represents a WebSocket message
@@ -53,6 +54,11 @@ func NewWebSocketManager() *WebSocketManager {
 	}
 }
 
+// SetArchGuardian sets the ArchGuardian reference for delegating broadcasts
+func (wsm *WebSocketManager) SetArchGuardian(ag *guardian.ArchGuardian) {
+	wsm.archGuardian = ag
+}
+
 // HandleConnection handles a new WebSocket connection
 func (wsm *WebSocketManager) HandleConnection(w http.ResponseWriter, r *http.Request, archGuardian *guardian.ArchGuardian) {
 	// Upgrade HTTP connection to WebSocket
@@ -65,12 +71,15 @@ func (wsm *WebSocketManager) HandleConnection(w http.ResponseWriter, r *http.Req
 
 	log.Println("WebSocket client connected")
 
-	// Register the connection with ArchGuardian
+	// Register with ArchGuardian for log streaming
+	// ArchGuardian uses a dedicated broadcastWorker goroutine that handles all writes sequentially,
+	// preventing concurrent write panics. The WebSocketManager should NOT write to these connections
+	// directly - only ArchGuardian's broadcastWorker should write to them.
 	if archGuardian != nil {
 		archGuardian.AddDashboardConnection(conn)
 	}
 
-	// Register the connection locally for broadcasting
+	// Register the connection locally for tracking only (not for broadcasting)
 	wsConn := &wsConnection{conn: conn}
 	wsm.mutex.Lock()
 	wsm.connections[conn] = wsConn
@@ -126,7 +135,7 @@ func (wsm *WebSocketManager) HandleConnection(w http.ResponseWriter, r *http.Req
 
 	log.Println("WebSocket client disconnected")
 
-	// Unregister the connection from ArchGuardian
+	// Unregister from ArchGuardian
 	if archGuardian != nil {
 		archGuardian.RemoveDashboardConnection(conn)
 	}
@@ -138,22 +147,30 @@ func (wsm *WebSocketManager) HandleConnection(w http.ResponseWriter, r *http.Req
 }
 
 // BroadcastMessage broadcasts a message to all connected clients
+// This delegates to ArchGuardian's broadcast system to prevent concurrent writes
 func (wsm *WebSocketManager) BroadcastMessage(msgType string, data interface{}) {
-	wsm.mutex.RLock()
-	connections := make([]*wsConnection, 0, len(wsm.connections))
-	for _, wsConn := range wsm.connections {
-		connections = append(connections, wsConn)
-	}
-	wsm.mutex.RUnlock()
+	if wsm.archGuardian != nil {
+		// Delegate to ArchGuardian's safe broadcast system
+		wsm.archGuardian.BroadcastToDashboard(msgType, data)
+	} else {
+		// Fallback: write directly if ArchGuardian is not available
+		// This should rarely happen, but provides a safety net
+		wsm.mutex.RLock()
+		connections := make([]*wsConnection, 0, len(wsm.connections))
+		for _, wsConn := range wsm.connections {
+			connections = append(connections, wsConn)
+		}
+		wsm.mutex.RUnlock()
 
-	message := WSMessage{
-		Type:      msgType,
-		Timestamp: time.Now(),
-		Data:      data,
-	}
+		message := WSMessage{
+			Type:      msgType,
+			Timestamp: time.Now(),
+			Data:      data,
+		}
 
-	for _, wsConn := range connections {
-		wsm.sendMessage(wsConn, message)
+		for _, wsConn := range connections {
+			wsm.sendMessage(wsConn, message)
+		}
 	}
 }
 

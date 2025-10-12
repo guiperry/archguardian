@@ -64,6 +64,9 @@ func main() {
 	log.Println("✅ Chromem-go embedded database initialized successfully")
 
 	// Create collections for different data types
+	// Note: Collections are created with nil embedding function here
+	// The actual embedding function will be provided when accessing the collection
+	// This is fine because chromem-go allows getting a collection with a different embedding function
 	collections := map[string]string{
 		"projects":         "Project metadata and configuration",
 		"knowledge-graphs": "Scan results with node/edge data",
@@ -79,7 +82,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("❌ Failed to create collection %s: %v", name, err)
 		}
-		log.Printf("✅ Created collection: %s", name)
+		log.Printf("✅ Created/verified collection: %s", name)
 	}
 
 	// Initialize ChromemDB Manager for knowledge graph and risk storage
@@ -167,6 +170,9 @@ func main() {
 		ScanManager:  scanManager,
 	}
 
+	// Set ArchGuardian reference in WebSocketManager for delegating broadcasts
+	wsManager.SetArchGuardian(guardianCore)
+
 	// Print startup banner
 	printStartupBanner(cfg)
 
@@ -216,6 +222,9 @@ func initializeInferenceEngine(cfg *config.Config) (*inference_engine.InferenceS
 	// Configure LLM attempts based on available API keys
 	var attemptConfigs []inference_engine.LLMAttemptConfig
 
+	// Track if we have a primary provider configured
+	hasPrimary := false
+
 	// Add Cerebras as primary if configured
 	if cfg.AIProviders.Cerebras.APIKey != "" {
 		attemptConfigs = append(attemptConfigs, inference_engine.LLMAttemptConfig{
@@ -225,19 +234,34 @@ func initializeInferenceEngine(cfg *config.Config) (*inference_engine.InferenceS
 			MaxTokens:    8000,
 			IsPrimary:    true,
 		})
-		log.Println("✅ Cerebras provider configured")
+		hasPrimary = true
+		log.Println("✅ Cerebras provider configured as primary")
 	}
 
-	// Add Gemini as fallback if configured
+	// Add Gemini - as primary if no other primary exists, otherwise as fallback
 	if cfg.AIProviders.Gemini.APIKey != "" {
+		// The planner model defined in the orchestrator config is the source of truth.
+		// We use this name to configure the Gemini provider itself.
+		plannerModelName := cfg.Orchestrator.PlannerModel
+		if plannerModelName == "" {
+			// Fallback to the generic Gemini model name if the specific orchestrator one isn't set.
+			plannerModelName = cfg.AIProviders.Gemini.Model
+		}
+
+		isPrimary := !hasPrimary // Set as primary if no other primary provider exists
 		attemptConfigs = append(attemptConfigs, inference_engine.LLMAttemptConfig{
 			ProviderName: "gemini",
-			ModelName:    cfg.AIProviders.Gemini.Model,
+			ModelName:    plannerModelName, // Ensure the loaded model has the exact name the orchestrator will request.
 			APIKeyEnvVar: "GEMINI_API_KEY",
-			MaxTokens:    32000,
-			IsPrimary:    false, // Powerful models like Gemini Pro are better as fallbacks or for specific tasks
+			MaxTokens:    100000, // Gemini 2.5 Flash supports up to 1M tokens
+			IsPrimary:    isPrimary,
 		})
-		log.Println("✅ Gemini provider configured")
+		if isPrimary {
+			hasPrimary = true
+			log.Println("✅ Gemini provider configured as primary")
+		} else {
+			log.Println("✅ Gemini provider configured as fallback")
+		}
 	}
 
 	// Add Anthropic as fallback if configured

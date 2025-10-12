@@ -511,19 +511,19 @@ func handleAPIDocs(w http.ResponseWriter, _ *http.Request) {
 // handleGetAlerts returns all alerts
 func handleGetAlerts(w http.ResponseWriter, _ *http.Request, _ *ArchGuardian) {
 	w.Header().Set("Content-Type", "application/json")
-	
+
 	// For now, return empty alerts array with proper JSON structure
 	// In a real implementation, this would fetch from the data engine
 	response := map[string]interface{}{
 		"alerts": []interface{}{},
 	}
-	
+
 	jsonData, err := json.Marshal(response)
 	if err != nil {
 		http.Error(w, "Failed to marshal alerts", http.StatusInternalServerError)
 		return
 	}
-	
+
 	w.WriteHeader(http.StatusOK)
 	w.Write(jsonData)
 }
@@ -531,23 +531,23 @@ func handleGetAlerts(w http.ResponseWriter, _ *http.Request, _ *ArchGuardian) {
 // handleResolveAlert resolves a specific alert
 func handleResolveAlert(w http.ResponseWriter, r *http.Request, _ *ArchGuardian) {
 	w.Header().Set("Content-Type", "application/json")
-	
+
 	vars := mux.Vars(r)
 	alertID := vars["id"]
-	
+
 	// For now, just return success
 	// In a real implementation, this would resolve the alert in the data engine
 	response := map[string]interface{}{
 		"id":       alertID,
 		"resolved": true,
 	}
-	
+
 	jsonData, err := json.Marshal(response)
 	if err != nil {
 		http.Error(w, "Failed to marshal response", http.StatusInternalServerError)
 		return
 	}
-	
+
 	w.WriteHeader(http.StatusOK)
 	w.Write(jsonData)
 }
@@ -555,20 +555,20 @@ func handleResolveAlert(w http.ResponseWriter, r *http.Request, _ *ArchGuardian)
 // handleClearResolvedAlerts clears all resolved alerts
 func handleClearResolvedAlerts(w http.ResponseWriter, _ *http.Request, _ *ArchGuardian) {
 	w.Header().Set("Content-Type", "application/json")
-	
+
 	// For now, just return success
 	// In a real implementation, this would clear resolved alerts in the data engine
 	response := map[string]interface{}{
 		"success": true,
 		"cleared": 0,
 	}
-	
+
 	jsonData, err := json.Marshal(response)
 	if err != nil {
 		http.Error(w, "Failed to marshal response", http.StatusInternalServerError)
 		return
 	}
-	
+
 	w.WriteHeader(http.StatusOK)
 	w.Write(jsonData)
 }

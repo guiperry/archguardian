@@ -40,6 +40,9 @@ type wsConnection struct {
 func (wsc *wsConnection) WriteMessage(messageType int, data []byte) error {
 	wsc.mutex.Lock()
 	defer wsc.mutex.Unlock()
+	// Set write deadline to prevent blocking indefinitely
+	// Increased to 30 seconds to accommodate slower network conditions and busy clients
+	wsc.conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
 	return wsc.conn.WriteMessage(messageType, data)
 }
 
@@ -47,7 +50,15 @@ func (wsc *wsConnection) WriteMessage(messageType int, data []byte) error {
 func (wsc *wsConnection) WriteJSON(v interface{}) error {
 	wsc.mutex.Lock()
 	defer wsc.mutex.Unlock()
+	// Set write deadline to prevent blocking indefinitely
+	// Increased to 30 seconds to accommodate slower network conditions and busy clients
+	wsc.conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
 	return wsc.conn.WriteJSON(v)
+}
+
+// broadcastMessage represents a message to be broadcast to all WebSocket clients
+type broadcastMessage struct {
+	data []byte
 }
 
 // ArchGuardian is the main orchestration component that coordinates all services
@@ -66,6 +77,8 @@ type ArchGuardian struct {
 	baselineStarted bool                        // Whether baseline periodic updates have been started
 	baselineMutex   sync.Mutex                  // Protects baselineStarted
 	projectID       string                      // Unique identifier for the current project
+	broadcastChan   chan broadcastMessage       // Channel for broadcasting messages to WebSocket clients
+	broadcastDone   chan struct{}               // Channel to signal broadcast goroutine shutdown
 }
 
 const (
@@ -253,9 +266,6 @@ func (lw *logWriter) Write(p []byte) (n int, err error) {
 	// Write to original stdout
 	n, err = os.Stdout.Write(p)
 
-	lw.bufferMutex.Lock()
-	defer lw.bufferMutex.Unlock()
-
 	// Create standardized WebSocket message for frontend compatibility
 	message := createWebSocketMessage("log", map[string]interface{}{
 		"message": strings.TrimSpace(string(p)),
@@ -268,11 +278,11 @@ func (lw *logWriter) Write(p []byte) (n int, err error) {
 		jsonMessage = p
 	}
 
-	// If the client is ready, broadcast immediately.
-	if lw.clientReady && lw.ag != nil {
-		lw.ag.broadcastLogToDashboard(string(jsonMessage))
-	} else {
-		// Otherwise, buffer the initial logs.
+	lw.bufferMutex.Lock()
+	clientReady := lw.clientReady
+	shouldBuffer := !clientReady
+	if shouldBuffer {
+		// Buffer the initial logs
 		if lw.maxBufferSize == 0 {
 			lw.maxBufferSize = 100 // Default max buffer size
 		}
@@ -282,6 +292,12 @@ func (lw *logWriter) Write(p []byte) (n int, err error) {
 			copy(logCopy, jsonMessage)
 			lw.initialLogs = append(lw.initialLogs, logCopy)
 		}
+	}
+	lw.bufferMutex.Unlock()
+
+	// Broadcast outside the lock to avoid holding it during I/O
+	if clientReady && lw.ag != nil {
+		lw.ag.broadcastLogToDashboard(string(jsonMessage))
 	}
 
 	return n, err
@@ -387,7 +403,12 @@ func NewArchGuardian(config *config.Config, aiEngine *inference_engine.Inference
 		chromemManager: chromemManager,
 		triggerScan:    make(chan bool), // Initialize the channel
 		projectID:      projectID,
+		broadcastChan:  make(chan broadcastMessage, 100), // Buffered channel for broadcasts
+		broadcastDone:  make(chan struct{}),
 	}
+
+	// Start the broadcast worker goroutine
+	go guardian.broadcastWorker()
 
 	// Initialize and activate logWriter for real-time log streaming to dashboard
 	lw := &logWriter{
@@ -415,7 +436,7 @@ func NewArchGuardian(config *config.Config, aiEngine *inference_engine.Inference
 func (ag *ArchGuardian) Run(ctx context.Context) error {
 	log.Println("🚀 ArchGuardian starting...")
 	log.Printf("📁 Project: %s", ag.config.ProjectPath)
-	log.Printf("🤖 AI Providers: Cerebras (fast), Gemini (reasoning), %s (remediation)",
+	log.Printf("🤖 AI Providers: Gemini (primary), DeepSeek (fallback), %s (remediation)",
 		ag.config.AIProviders.CodeRemediationProvider)
 	log.Println("✅ ArchGuardian is running. Waiting for scan trigger from API or periodic schedule...")
 
@@ -430,7 +451,7 @@ func (ag *ArchGuardian) Run(ctx context.Context) error {
 
 	// Log environment information using getEnv function
 	log.Printf("📁 Project path: %s", getEnv("PROJECT_PATH", ag.config.ProjectPath))
-	log.Printf("🤖 AI Provider: %s", getEnv("AI_PROVIDER", "cerebras"))
+	log.Printf("🤖 AI Provider: %s", getEnv("AI_PROVIDER", "gemini"))
 
 	ticker := time.NewTicker(ag.config.ScanInterval)
 	defer ticker.Stop()
@@ -960,21 +981,40 @@ func (ag *ArchGuardian) removeDashboardConnectionByWrapper(wsConn *wsConnection)
 	}
 }
 
+// broadcastWorker is a dedicated goroutine that handles all WebSocket broadcasts
+// This ensures all writes happen sequentially, preventing concurrent write panics
+func (ag *ArchGuardian) broadcastWorker() {
+	for {
+		select {
+		case msg := <-ag.broadcastChan:
+			ag.connMutex.Lock()
+			// Create a copy of connections to avoid holding lock during writes
+			conns := make([]*wsConnection, len(ag.dashboardConns))
+			copy(conns, ag.dashboardConns)
+			ag.connMutex.Unlock()
+
+			// Write to connections without holding the list mutex
+			for _, conn := range conns {
+				if err := conn.WriteMessage(websocket.TextMessage, msg.data); err != nil {
+					// Don't log here to avoid recursive logging
+					// Remove broken connection
+					go ag.removeDashboardConnectionByWrapper(conn)
+				}
+			}
+		case <-ag.broadcastDone:
+			return
+		}
+	}
+}
+
 // broadcastLogToDashboard broadcasts a raw string message to all connected dashboard clients.
 func (ag *ArchGuardian) broadcastLogToDashboard(message string) {
-	ag.connMutex.Lock()
-	// Create a copy of connections to avoid holding lock during writes
-	conns := make([]*wsConnection, len(ag.dashboardConns))
-	copy(conns, ag.dashboardConns)
-	ag.connMutex.Unlock()
-
-	// Write to connections without holding the list mutex
-	for _, conn := range conns {
-		if err := conn.WriteMessage(websocket.TextMessage, []byte(message)); err != nil {
-			log.Printf("Failed to send message to dashboard client: %v", err)
-			// Remove broken connection
-			go ag.removeDashboardConnectionByWrapper(conn)
-		}
+	// Send to broadcast channel instead of writing directly
+	select {
+	case ag.broadcastChan <- broadcastMessage{data: []byte(message)}:
+		// Message queued successfully
+	default:
+		// Channel full, drop message to avoid blocking
 	}
 }
 
@@ -989,17 +1029,12 @@ func (ag *ArchGuardian) BroadcastToDashboard(messageType string, data interface{
 		return
 	}
 
-	ag.connMutex.Lock()
-	conns := make([]*wsConnection, len(ag.dashboardConns))
-	copy(conns, ag.dashboardConns)
-	ag.connMutex.Unlock()
-
-	for _, conn := range conns {
-		if err := conn.WriteMessage(websocket.TextMessage, jsonData); err != nil {
-			log.Printf("Failed to send message to dashboard client: %v", err)
-			// Remove broken connection
-			go ag.removeDashboardConnectionByWrapper(conn)
-		}
+	// Send to broadcast channel instead of writing directly
+	select {
+	case ag.broadcastChan <- broadcastMessage{data: jsonData}:
+		// Message queued successfully
+	default:
+		// Channel full, drop message to avoid blocking
 	}
 }
 

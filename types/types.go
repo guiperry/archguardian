@@ -23,22 +23,22 @@ type CodacyClientInterface interface {
 
 // CodacyAnalysis represents a Codacy analysis result
 type CodacyAnalysis struct {
-	ProjectID   string       `json:"projectId"`
-	CommitID    string       `json:"commitId"`
-	AnalysisID  string       `json:"analysisId"`
-	Timestamp   time.Time    `json:"timestamp"`
-	Issues      []CodacyIssue `json:"issues"`
+	ProjectID  string        `json:"projectId"`
+	CommitID   string        `json:"commitId"`
+	AnalysisID string        `json:"analysisId"`
+	Timestamp  time.Time     `json:"timestamp"`
+	Issues     []CodacyIssue `json:"issues"`
 }
 
 // CodacyIssue represents a single issue from Codacy
 type CodacyIssue struct {
-	ID          string `json:"id"`
-	PatternID   string `json:"patternId"`
-	File        string `json:"file"`
-	Line         int    `json:"line"`
-	Message     string `json:"message"`
-	Severity    string `json:"severity"`
-	Category    string `json:"category"`
+	ID        string `json:"id"`
+	PatternID string `json:"patternId"`
+	File      string `json:"file"`
+	Line      int    `json:"line"`
+	Message   string `json:"message"`
+	Severity  string `json:"severity"`
+	Category  string `json:"category"`
 }
 
 // NodeType represents the type of a node in the knowledge graph
@@ -46,16 +46,16 @@ type NodeType string
 
 // Node type constants
 const (
-	NodeTypeCode      NodeType = "code"
-	NodeTypeAPI       NodeType = "api"
-	NodeTypeDatabase  NodeType = "database"
-	NodeTypeService   NodeType = "service"
-	NodeTypeLibrary   NodeType = "library"
-	NodeTypeDataFlow  NodeType = "dataflow"
-	NodeTypeConfig    NodeType = "config"
-	NodeTypeProcess   NodeType = "process"
+	NodeTypeCode       NodeType = "code"
+	NodeTypeAPI        NodeType = "api"
+	NodeTypeDatabase   NodeType = "database"
+	NodeTypeService    NodeType = "service"
+	NodeTypeLibrary    NodeType = "library"
+	NodeTypeDataFlow   NodeType = "dataflow"
+	NodeTypeConfig     NodeType = "config"
+	NodeTypeProcess    NodeType = "process"
 	NodeTypeConnection NodeType = "connection"
-	NodeTypeNetwork   NodeType = "network"
+	NodeTypeNetwork    NodeType = "network"
 )
 
 // Node represents a node in the knowledge graph
@@ -221,14 +221,14 @@ func (ra *RiskAssessment) ToDocument(projectID string) (*Document, error) {
 	docID := fmt.Sprintf("assessment_%s_%s", projectID, timestamp)
 
 	metadata := map[string]interface{}{
-		"type":                    "risk-assessment",
-		"project_id":              projectID,
-		"timestamp":               ra.Timestamp.Format(time.RFC3339),
-		"overall_score":           fmt.Sprintf("%.2f", ra.OverallScore),
-		"technical_debt_count":    fmt.Sprintf("%d", len(ra.TechnicalDebt)),
-		"security_vulns_count":    fmt.Sprintf("%d", len(ra.SecurityVulns)),
-		"obsolete_code_count":     fmt.Sprintf("%d", len(ra.ObsoleteCode)),
-		"dependency_risks_count":  fmt.Sprintf("%d", len(ra.DangerousDependencies)),
+		"type":                   "risk-assessment",
+		"project_id":             projectID,
+		"timestamp":              ra.Timestamp.Format(time.RFC3339),
+		"overall_score":          fmt.Sprintf("%.2f", ra.OverallScore),
+		"technical_debt_count":   fmt.Sprintf("%d", len(ra.TechnicalDebt)),
+		"security_vulns_count":   fmt.Sprintf("%d", len(ra.SecurityVulns)),
+		"obsolete_code_count":    fmt.Sprintf("%d", len(ra.ObsoleteCode)),
+		"dependency_risks_count": fmt.Sprintf("%d", len(ra.DangerousDependencies)),
 	}
 
 	return &Document{
