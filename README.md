@@ -47,6 +47,7 @@ AI generates and executes fixes—updating libraries, removing dead code, patchi
 - **Test Coverage Analysis**: Identifies untested code paths
 - **Security Vulnerability Detection**: Scans for common security issues
 - **Code Quality Metrics**: Cyclomatic complexity, code smells, anti-patterns
+- **Web Baseline Compatibility Checker**: Validates CSS, JavaScript, and HTML features against web standards
 
 ### 🗄️ **Full Database Model Analysis**
 - **Schema Extraction**: Analyzes database structures and relationships
@@ -72,6 +73,7 @@ AI generates and executes fixes—updating libraries, removing dead code, patchi
 - **Real-Time WebSocket Updates**: Live scan progress and issue notifications
 - **Interactive Knowledge Graph**: Explore architecture visually
 - **Issue Tracking**: Prioritized list of security and quality issues
+- **Web Compatibility Reports**: Browser compatibility warnings and recommendations
 - **Coverage Reports**: Visual test coverage analysis
 - **System Monitoring**: Real-time performance metrics
 
@@ -253,17 +255,19 @@ graph TB
 - **WebSocket Server** - Real-time event streaming
 - **API Gateway** - Routes to all internal services
 
-#### **Scanner** (`main.go`)
+#### **Scanner** (`internal/scanner/`)
 - **Go AST Parsing** - Deep source code analysis
 - **Dependency Graph** - Import relationship mapping
 - **Test Coverage** - Coverage report generation
 - **Knowledge Graph** - Architecture visualization data
 - **File System Analysis** - Project structure scanning
+- **Web Baseline Checker** - CSS/JS/HTML compatibility validation
 
-#### **Risk Diagnoser** (`main.go`)
+#### **Risk Diagnoser** (`internal/risk/`)
 - **Security Vulnerability Detection** - SQL injection, XSS, etc.
 - **Code Quality Analysis** - Cyclomatic complexity, code smells
 - **Technical Debt Identification** - Deprecated code, TODOs
+- **Compatibility Analysis** - Browser compatibility warnings
 - **Risk Scoring** - Priority-based issue ranking
 - **Remediation Suggestions** - AI-powered fix recommendations
 
@@ -414,6 +418,71 @@ Query your codebase using natural language:
 "List all deprecated dependencies"
 "Find functions with high cyclomatic complexity"
 ```
+
+### Web Baseline Compatibility Checker
+
+ArchGuardian includes an integrated **Web Baseline Compatibility Checker** that validates your web code against the [Web Platform Baseline](https://web-platform-dx.github.io/web-features/) standards to ensure cross-browser compatibility.
+
+#### What It Does
+
+The Baseline Checker automatically scans your web assets and identifies:
+
+- **CSS Properties**: Detects non-baseline CSS properties that may not be supported across all browsers
+- **JavaScript APIs**: Identifies browser APIs that aren't part of the baseline standard
+- **HTML Elements**: Flags HTML elements that may have limited browser support
+- **HTML Attributes**: Checks for non-standard or experimental HTML attributes
+
+#### How It Works
+
+1. **Automatic Updates**: The checker fetches the latest baseline features from the [web-features repository](https://github.com/web-platform-dx/web-features) every 24 hours
+2. **On-Demand Loading**: Features are loaded lazily when you start a project scan to avoid unnecessary network calls during startup
+3. **Real-Time Scanning**: During each scan cycle, ArchGuardian analyzes:
+   - `.css` files for CSS property usage
+   - `.js` and `.ts` files for JavaScript API usage
+   - `.html` files for HTML elements and attributes
+
+#### Viewing Compatibility Issues
+
+Compatibility issues are displayed in the dashboard under the **Issues** tab:
+
+1. Navigate to the **Issues** view in the dashboard
+2. Click on the **Web Compatibility** tab
+3. Review the list of compatibility warnings with:
+   - **Feature Name**: The specific CSS property, JS API, or HTML element
+   - **Location**: File path where the feature is used
+   - **Severity**: Risk level (typically "low" for compatibility issues)
+   - **Remediation**: Recommendations including MDN documentation links
+
+#### Example Compatibility Issue
+
+```
+ID: COMPAT-css-backdrop-filter
+Location: /styles/main.css
+Type: compatibility
+Severity: low
+Description: Usage of non-Baseline CSS Property: 'backdrop-filter'
+Remediation: This feature may not be supported in all browsers. Consider 
+replacing it with a widely-supported alternative or adding fallbacks/polyfills.
+See MDN for details: https://developer.mozilla.org/en-US/search?q=backdrop-filter
+```
+
+#### Configuration
+
+The baseline checker runs automatically during scans. To start baseline updates at application initialization (useful for testing):
+
+```env
+START_BASELINE_ON_INIT=true
+```
+
+By default, this is `false` to avoid network calls during startup.
+
+#### Data Source
+
+The baseline checker uses the official [Web Platform Baseline](https://github.com/web-platform-dx/web-features) dataset, which is maintained by the Web Platform DX Community Group and includes features that are:
+
+- Widely available across major browsers
+- Stable and unlikely to change
+- Safe to use in production without polyfills
 
 ---
 

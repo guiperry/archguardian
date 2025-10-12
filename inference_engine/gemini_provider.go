@@ -2,9 +2,12 @@
 package inference_engine
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json" // Import json package
 	"fmt"
+	"io"
 	"log"
 	"net/http" // Import net/http package
 	"strings"
@@ -16,8 +19,6 @@ import (
 	// "google.golang.org/api/option" // REMOVE unused import
 
 	"os" // Import os package
-
-	"github.com/google/generative-ai-go/genai"
 	"github.com/guiperry/gollm_cerebras/config"
 	"github.com/guiperry/gollm_cerebras/providers"
 	"github.com/guiperry/gollm_cerebras/types"
@@ -44,6 +45,7 @@ type GeminiProvider struct {
 type GeminiRequest struct {
 	Contents         []GeminiContent         `json:"contents"`
 	GenerationConfig *GeminiGenerationConfig `json:"generationConfig,omitempty"`
+	Stream           bool                     `json:"stream,omitempty"`
 	// SafetySettings, Tools, etc. can be added here if needed
 }
 
@@ -74,10 +76,14 @@ type GeminiGenerationConfig struct {
 
 type GeminiResponse struct {
 	Candidates []struct {
-		Content *GeminiContent `json:"content"`
-		// FinishReason, SafetyRatings, etc.
+		Content      *GeminiContent `json:"content"`
+		FinishReason string         `json:"finishReason,omitempty"`
+		// SafetyRatings, etc. can be added here if needed
 	} `json:"candidates"`
-	// PromptFeedback
+	PromptFeedback *struct {
+		BlockReason string `json:"blockReason,omitempty"`
+		// SafetyRatings, etc. can be added here if needed
+	} `json:"promptFeedback,omitempty"`
 }
 
 // Error structure (example, might need adjustment based on actual API errors)
@@ -194,15 +200,31 @@ func (p *GeminiProvider) PrepareRequest(prompt string, options map[string]interf
 				},
 			},
 		},
-		GenerationConfig: &GeminiGenerationConfig{
-			// Apply options if needed, similar to how it was done for Cerebras/Deepseek
-			// Temperature: p.temperature,
-			// TopP: p.topP,
-			// TopK: p.topK,
-			// MaxOutputTokens: &maxTokensInt32,
-		},
+		GenerationConfig: &GeminiGenerationConfig{},
 	}
-	// TODO: Apply options from the 'options' map to reqBody.GenerationConfig
+
+	// Apply options from the 'options' map to reqBody.GenerationConfig
+	if options != nil {
+		if tempVal, ok := options["temperature"].(float64); ok {
+			tempFloat32 := float32(tempVal)
+			reqBody.GenerationConfig.Temperature = &tempFloat32
+		}
+		if topPVal, ok := options["top_p"].(float64); ok {
+			topPFloat32 := float32(topPVal)
+			reqBody.GenerationConfig.TopP = &topPFloat32
+		}
+		if topKVal, ok := options["top_k"].(float64); ok {
+			topKInt32 := int32(topKVal)
+			reqBody.GenerationConfig.TopK = &topKInt32
+		}
+		if maxTokensVal, ok := options["max_tokens"].(float64); ok {
+			maxTokensInt32 := int32(maxTokensVal)
+			reqBody.GenerationConfig.MaxOutputTokens = &maxTokensInt32
+		}
+		if streamVal, ok := options["stream"].(bool); ok {
+			reqBody.Stream = streamVal
+		}
+	}
 
 	// Marshal the request body
 	jsonBytes, err := json.Marshal(reqBody)
@@ -236,8 +258,31 @@ func (p *GeminiProvider) PrepareRequestWithMessages(messages []types.MemoryMessa
 	}
 
 	reqBody := GeminiRequest{
-		Contents: geminiContents,
-		// TODO: Apply GenerationConfig from options map
+		Contents:         geminiContents,
+		GenerationConfig: &GeminiGenerationConfig{},
+	}
+
+	// Apply GenerationConfig from options map
+	if options != nil {
+		if tempVal, ok := options["temperature"].(float64); ok {
+			tempFloat32 := float32(tempVal)
+			reqBody.GenerationConfig.Temperature = &tempFloat32
+		}
+		if topPVal, ok := options["top_p"].(float64); ok {
+			topPFloat32 := float32(topPVal)
+			reqBody.GenerationConfig.TopP = &topPFloat32
+		}
+		if topKVal, ok := options["top_k"].(float64); ok {
+			topKInt32 := int32(topKVal)
+			reqBody.GenerationConfig.TopK = &topKInt32
+		}
+		if maxTokensVal, ok := options["max_tokens"].(float64); ok {
+			maxTokensInt32 := int32(maxTokensVal)
+			reqBody.GenerationConfig.MaxOutputTokens = &maxTokensInt32
+		}
+		if streamVal, ok := options["stream"].(bool); ok {
+			reqBody.Stream = streamVal
+		}
 	}
 	jsonBytes, err := json.Marshal(reqBody)
 	return jsonBytes, err
@@ -258,15 +303,44 @@ func (p *GeminiProvider) ParseResponse(body []byte) (string, error) {
 		return "", fmt.Errorf("failed to unmarshal Gemini response: %w", err)
 	}
 
-	if len(resp.Candidates) > 0 && resp.Candidates[0].Content != nil && len(resp.Candidates[0].Content.Parts) > 0 {
-		// Assuming the first part of the first candidate is the text response
-		return resp.Candidates[0].Content.Parts[0].Text, nil
+	if len(resp.Candidates) > 0 {
+		candidate := resp.Candidates[0]
+
+		// Check if content exists and has parts
+		if candidate.Content != nil && len(candidate.Content.Parts) > 0 {
+			// Assuming the first part of the first candidate is the text response
+			return candidate.Content.Parts[0].Text, nil
+		}
+
+		// Handle finish reasons that indicate no content
+		switch candidate.FinishReason {
+		case "SAFETY":
+			p.logger.Warn("Gemini response blocked due to safety filters", "finishReason", candidate.FinishReason)
+			return "", fmt.Errorf("response blocked by Gemini safety filters")
+		case "RECITATION":
+			p.logger.Warn("Gemini response blocked due to recitation filters", "finishReason", candidate.FinishReason)
+			return "", fmt.Errorf("response blocked by Gemini recitation filters")
+		case "MAX_TOKENS":
+			p.logger.Warn("Gemini response stopped due to max tokens limit", "finishReason", candidate.FinishReason)
+			return "", fmt.Errorf("response truncated due to max tokens limit")
+		case "OTHER":
+			p.logger.Warn("Gemini response finished for other reasons", "finishReason", candidate.FinishReason)
+			return "", fmt.Errorf("response finished for unspecified reasons")
+		default:
+			p.logger.Warn("Gemini response has no content but valid finish reason", "finishReason", candidate.FinishReason)
+			return "", fmt.Errorf("no content in response (finish reason: %s)", candidate.FinishReason)
+		}
 	}
 
-	// Handle cases with no valid content (e.g., safety blocks, empty response)
-	// TODO: Inspect resp.Candidates[0].FinishReason or PromptFeedback if needed
-	p.logger.Warn("Gemini response parsed but no valid content found", "body", string(body))
-	return "", fmt.Errorf("no valid content found in Gemini response")
+	// Check PromptFeedback for blocked prompts
+	if resp.PromptFeedback != nil && resp.PromptFeedback.BlockReason != "" {
+		p.logger.Warn("Gemini prompt was blocked", "blockReason", resp.PromptFeedback.BlockReason)
+		return "", fmt.Errorf("prompt blocked by Gemini: %s", resp.PromptFeedback.BlockReason)
+	}
+
+	// Handle cases with no candidates at all
+	p.logger.Warn("Gemini response parsed but no candidates found", "body", string(body))
+	return "", fmt.Errorf("no response candidates found in Gemini response")
 }
 
 // SetExtraHeaders configures additional HTTP headers.
@@ -374,10 +448,83 @@ func (p *GeminiProvider) SetDefaultOptions(cfg *config.Config) {
 	p.logger.Info("Default options processing complete for Gemini", "final_model", p.model, "final_maxTokens", p.maxTokens)
 }
 
+// validateGeminiConfig validates Gemini API configuration parameters
+func validateGeminiConfig(key string, value interface{}) error {
+	switch key {
+	case "temperature":
+		var temp float64
+		switch v := value.(type) {
+		case float64:
+			temp = v
+		case float32:
+			temp = float64(v)
+		default:
+			return fmt.Errorf("temperature must be a number")
+		}
+		if temp < 0.0 || temp > 2.0 {
+			return fmt.Errorf("temperature must be between 0.0 and 2.0, got %f", temp)
+		}
+	case "top_p":
+		var topP float64
+		switch v := value.(type) {
+		case float64:
+			topP = v
+		case float32:
+			topP = float64(v)
+		default:
+			return fmt.Errorf("top_p must be a number")
+		}
+		if topP < 0.0 || topP > 1.0 {
+			return fmt.Errorf("top_p must be between 0.0 and 1.0, got %f", topP)
+		}
+	case "top_k":
+		var topK int
+		switch v := value.(type) {
+		case int:
+			topK = v
+		case int32:
+			topK = int(v)
+		case float64:
+			if v != float64(int(v)) {
+				return fmt.Errorf("top_k must be an integer")
+			}
+			topK = int(v)
+		default:
+			return fmt.Errorf("top_k must be an integer")
+		}
+		if topK < 1 {
+			return fmt.Errorf("top_k must be at least 1, got %d", topK)
+		}
+	case "max_tokens":
+		var maxTokens int
+		switch v := value.(type) {
+		case int:
+			maxTokens = v
+		case float64:
+			if v != float64(int(v)) {
+				return fmt.Errorf("max_tokens must be an integer")
+			}
+			maxTokens = int(v)
+		default:
+			return fmt.Errorf("max_tokens must be an integer")
+		}
+		if maxTokens < 1 {
+			return fmt.Errorf("max_tokens must be at least 1, got %d", maxTokens)
+		}
+	}
+	return nil
+}
+
 // SetOption sets a specific option for the provider.
 func (p *GeminiProvider) SetOption(key string, value interface{}) {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
+
+	// Validate the configuration
+	if err := validateGeminiConfig(key, value); err != nil {
+		p.logger.Warn("Invalid configuration value", "key", key, "error", err)
+		return // Don't set invalid values
+	}
 
 	switch key {
 	case "model":
@@ -426,15 +573,54 @@ func (p *GeminiProvider) SupportsStreaming() bool {
 
 // PrepareStreamRequest creates a request body for streaming API calls.
 func (p *GeminiProvider) PrepareStreamRequest(prompt string, options map[string]interface{}) ([]byte, error) {
-	// Similar to PrepareRequest, but for streaming
+	// Ensure stream is set to true for streaming requests
+	if options == nil {
+		options = make(map[string]interface{})
+	}
+	options["stream"] = true
 	return p.PrepareRequest(prompt, options)
 }
 
 // ParseStreamResponse processes a single chunk from a streaming response.
 func (p *GeminiProvider) ParseStreamResponse(chunk []byte) (string, error) {
-	// This method won't be used directly since we're using the client library
-	// But we need to implement it to satisfy the interface
-	return string(chunk), nil
+	// Parse the JSON response chunk
+	var streamResp GeminiResponse
+	if err := json.Unmarshal(chunk, &streamResp); err != nil {
+		return "", fmt.Errorf("failed to unmarshal streaming response chunk: %w", err)
+	}
+
+	// Extract text from candidates
+	if len(streamResp.Candidates) > 0 {
+		candidate := streamResp.Candidates[0]
+
+		// Check for finish reasons that indicate completion or errors
+		if candidate.FinishReason != "" {
+			switch candidate.FinishReason {
+			case "STOP":
+				// Normal completion - return empty string to indicate end
+				return "", nil
+			case "SAFETY":
+				return "", fmt.Errorf("response blocked by Gemini safety filters")
+			case "MAX_TOKENS":
+				return "", fmt.Errorf("response truncated due to max tokens limit")
+			default:
+				return "", fmt.Errorf("streaming finished with reason: %s", candidate.FinishReason)
+			}
+		}
+
+		// Return text content
+		if candidate.Content != nil && len(candidate.Content.Parts) > 0 {
+			return candidate.Content.Parts[0].Text, nil
+		}
+	}
+
+	// Check for prompt feedback (blocked prompts)
+	if streamResp.PromptFeedback != nil && streamResp.PromptFeedback.BlockReason != "" {
+		return "", fmt.Errorf("prompt blocked by Gemini: %s", streamResp.PromptFeedback.BlockReason)
+	}
+
+	// No content in this chunk
+	return "", nil
 }
 
 // --- Helper methods for actual implementation ---
@@ -581,27 +767,6 @@ func (p *GeminiProvider) GenerateContentFromMessages(ctx context.Context, messag
 	*/
 	//p.mutex.Unlock()
 
-	// Convert messages to Gemini format
-	var chat []*genai.Content // Use pointer slice
-	for _, msg := range messages {
-		role := msg.Role
-		if role == "assistant" {
-			role = "model"
-		}
-		// Ensure role is either "user" or "model"
-		if role != "user" && role != "model" {
-			p.logger.Warn("Invalid role for Gemini, skipping message", "role", role)
-			continue
-		}
-
-		content := &genai.Content{ // Create pointer
-			Role:  role,
-			Parts: []genai.Part{genai.Text(msg.Content)},
-		}
-		chat = append(chat, content)
-		p.logger.Debug("Added message to chat", "role", content.Role, "content_length", len(msg.Content), "chat_length", len(chat))
-	}
-
 	// HTTP request logic removed - handled by gollm
 	return "", fmt.Errorf("direct call to GeminiProvider.GenerateContentFromMessages is not the standard gollm flow")
 
@@ -616,26 +781,110 @@ func (p *GeminiProvider) StreamContent(ctx context.Context, prompt string) (chan
 		defer close(textChan)
 		defer close(errChan)
 
-		// TODO: Implement streaming using manual HTTP request
-		// This involves setting "stream":true in the request body,
-		// sending the request, and then reading the response body line by line,
-		// parsing each Server-Sent Event (SSE) chunk.
-		// For now, return an error indicating it's not implemented.
-		errChan <- fmt.Errorf("streaming not yet implemented for manual Gemini HTTP provider")
-		//return
-		//p.mutex.Lock()
-		// if p.temperature != nil {
-		// 	genModel.SetTemperature(*p.temperature) // undefined: genModel
-		// }
-		// if p.topP != nil {
-		// 	genModel.SetTopP(*p.topP) // undefined: genModel
-		// }
-		// if p.topK != nil {
-		// 	genModel.SetTopK(*p.topK) // undefined: genModel
-		// }
-		// genModel.SetMaxOutputTokens(int32(p.maxTokens)) // undefined: genModel
-		//p.mutex.Unlock()
+		// Prepare streaming request
+		reqBody, err := p.PrepareStreamRequest(prompt, nil)
+		if err != nil {
+			errChan <- fmt.Errorf("failed to prepare streaming request: %w", err)
+			return
+		}
 
+		// Get endpoint and headers
+		endpoint := p.Endpoint()
+		headers := p.Headers()
+
+		// Create HTTP request
+		req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(reqBody))
+		if err != nil {
+			errChan <- fmt.Errorf("failed to create HTTP request: %w", err)
+			return
+		}
+
+		// Set headers
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+
+		p.logger.Debug("Sending streaming request to Gemini API", "endpoint", endpoint)
+
+		// Send request
+		resp, err := p.client.Do(req)
+		if err != nil {
+			errChan <- fmt.Errorf("failed to send streaming request: %w", err)
+			return
+		}
+		defer resp.Body.Close()
+
+		// Check status code
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			errChan <- fmt.Errorf("gemini API returned status %d: %s", resp.StatusCode, string(body))
+			return
+		}
+
+		// Read streaming response line by line
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+
+			// Parse the JSON response
+			var streamResp GeminiResponse
+			if err := json.Unmarshal([]byte(line), &streamResp); err != nil {
+				p.logger.Warn("Failed to parse streaming response line", "line", line, "error", err)
+				continue
+			}
+
+			// Extract text from candidates
+			if len(streamResp.Candidates) > 0 {
+				candidate := streamResp.Candidates[0]
+
+				// Check for finish reasons that indicate completion or errors
+				if candidate.FinishReason != "" {
+					switch candidate.FinishReason {
+					case "STOP":
+						// Normal completion
+						p.logger.Debug("Streaming completed normally")
+						return
+					case "SAFETY":
+						errChan <- fmt.Errorf("response blocked by Gemini safety filters")
+						return
+					case "MAX_TOKENS":
+						errChan <- fmt.Errorf("response truncated due to max tokens limit")
+						return
+					default:
+						p.logger.Warn("Streaming finished with reason", "finishReason", candidate.FinishReason)
+						return
+					}
+				}
+
+				// Send text content
+				if candidate.Content != nil && len(candidate.Content.Parts) > 0 {
+					text := candidate.Content.Parts[0].Text
+					if text != "" {
+						select {
+						case textChan <- text:
+						case <-ctx.Done():
+							errChan <- ctx.Err()
+							return
+						}
+					}
+				}
+			}
+
+			// Check for prompt feedback (blocked prompts)
+			if streamResp.PromptFeedback != nil && streamResp.PromptFeedback.BlockReason != "" {
+				errChan <- fmt.Errorf("prompt blocked by Gemini: %s", streamResp.PromptFeedback.BlockReason)
+				return
+			}
+		}
+
+		// Check for scanner errors
+		if err := scanner.Err(); err != nil {
+			errChan <- fmt.Errorf("error reading streaming response: %w", err)
+			return
+		}
 	}()
 
 	return textChan, errChan
