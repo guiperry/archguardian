@@ -505,13 +505,22 @@ func (s *Scanner) buildKnowledgeGraph(ctx context.Context) error {
 	// Also build edges from existing deterministic methods
 	s.buildDeterministicEdges(ctx)
 
-	log.Printf("  🕸️  Knowledge graph complete: %d nodes, %d edges", len(s.graph.Nodes), len(s.graph.Edges))
+	// Use mutex for reading graph state to avoid data races
+	s.mu.RLock()
+	nodeCount := len(s.graph.Nodes)
+	edgeCount := len(s.graph.Edges)
+	s.mu.RUnlock()
+
+	log.Printf("  🕸️  Knowledge graph complete: %d nodes, %d edges", nodeCount, edgeCount)
 	return nil
 }
 
 // prepareGraphData prepares graph data for deterministic relationship analysis
 func (s *Scanner) prepareGraphData() map[string]interface{} {
 	nodes := make([]map[string]interface{}, 0)
+
+	// Use mutex for reading graph state to avoid data races
+	s.mu.RLock()
 	for _, node := range s.graph.Nodes {
 		nodes = append(nodes, map[string]interface{}{
 			"id":           node.ID,
@@ -522,6 +531,7 @@ func (s *Scanner) prepareGraphData() map[string]interface{} {
 			"metadata":     node.Metadata,
 		})
 	}
+	s.mu.RUnlock()
 
 	return map[string]interface{}{
 		"nodes": nodes,
