@@ -30,9 +30,9 @@ build/
 *.sw?
 .env
 
-.archguardian/*
+
 .archguardian
-/archguardian-data
+
 .zencoder/
 docs/
 

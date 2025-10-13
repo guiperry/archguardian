@@ -9,16 +9,16 @@ import (
 	"time"
 
 	"archguardian/data_engine"
-	"archguardian/internal/scanner"
 	"archguardian/internal/risk"
+	"archguardian/internal/scanner"
 	"archguardian/types"
 )
 
 // AIRemediator handles AI-powered solution generation for detected issues
 type AIRemediator struct {
-	ai       types.AIEngineInterface
-	scanner  *scanner.Scanner
-	diagnoser *risk.RiskDiagnoser
+	ai             types.AIEngineInterface
+	scanner        *scanner.Scanner
+	diagnoser      *risk.RiskDiagnoser
 	chromemManager *data_engine.ChromemManager
 }
 
@@ -537,10 +537,10 @@ func (ar *AIRemediator) loadCodeSnippet(filePath string, lineNumber int, context
 	if filePath == "" {
 		return "// Code snippet not available", nil
 	}
-	
+
 	startLine := max(1, lineNumber-contextLines)
 	endLine := lineNumber + contextLines
-	
+
 	return fmt.Sprintf("Code snippet from %s (lines %d-%d):\n// Mock implementation - would read actual file content",
 		filePath, startLine, endLine), nil
 }
@@ -559,9 +559,9 @@ func (ar *AIRemediator) parseCodeChangesFromAI(aiResponse string) []CodeChange {
 
 		// Check for section headers
 		if strings.HasPrefix(strings.ToUpper(line), "REFACTORED_CODE:") ||
-		   strings.HasPrefix(strings.ToUpper(line), "CHANGES:") ||
-		   strings.HasPrefix(strings.ToUpper(line), "REMOVAL_STEPS:") ||
-		   strings.HasPrefix(strings.ToUpper(line), "MIGRATION:") {
+			strings.HasPrefix(strings.ToUpper(line), "CHANGES:") ||
+			strings.HasPrefix(strings.ToUpper(line), "REMOVAL_STEPS:") ||
+			strings.HasPrefix(strings.ToUpper(line), "MIGRATION:") {
 			// Save previous section if it exists
 			if currentSection != "" && currentContent.Len() > 0 {
 				change := ar.parseSectionToCodeChange(currentSection, currentContent.String())
@@ -610,7 +610,7 @@ func (ar *AIRemediator) extractTestPlanFromAI(aiResponse string) string {
 
 		// Check for TESTS section header
 		if strings.HasPrefix(strings.ToUpper(line), "TESTS:") ||
-		   strings.HasPrefix(strings.ToUpper(line), "TESTING:") {
+			strings.HasPrefix(strings.ToUpper(line), "TESTING:") {
 			inTestsSection = true
 			// Extract content after the colon
 			if colonIndex := strings.Index(line, ":"); colonIndex >= 0 {
@@ -678,8 +678,8 @@ func (ar *AIRemediator) parseDependencyChangesFromAI(aiResponse string) []CodeCh
 
 	// Look for dependency-related content in the AI response
 	if strings.Contains(strings.ToLower(aiResponse), "dependency") ||
-	   strings.Contains(strings.ToLower(aiResponse), "package") ||
-	   strings.Contains(strings.ToLower(aiResponse), "import") {
+		strings.Contains(strings.ToLower(aiResponse), "package") ||
+		strings.Contains(strings.ToLower(aiResponse), "import") {
 		return []CodeChange{
 			{
 				FilePath:   "go.mod",
@@ -1014,6 +1014,6 @@ type CodeChange struct {
 	FilePath   string `json:"file_path"`
 	OldContent string `json:"old_content"`
 	NewContent string `json:"new_content"`
-	LineStart   int    `json:"line_start"`
-	LineEnd     int    `json:"line_end"`
+	LineStart  int    `json:"line_start"`
+	LineEnd    int    `json:"line_end"`
 }

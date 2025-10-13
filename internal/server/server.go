@@ -625,10 +625,10 @@ func handleRemediateIssue(w http.ResponseWriter, r *http.Request, guardian *Arch
 	}
 
 	response := map[string]interface{}{
-		"success":  true,
-		"message":  "AI solution generated successfully",
-		"solution": solution,
-		"issue_id": issueID,
+		"success":   true,
+		"message":   "AI solution generated successfully",
+		"solution":  solution,
+		"issue_id":  issueID,
 		"timestamp": time.Now().Format(time.RFC3339),
 	}
 

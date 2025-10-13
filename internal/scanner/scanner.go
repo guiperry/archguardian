@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/shirou/gopsutil/v4/cpu"
@@ -35,6 +36,7 @@ type Scanner struct {
 	graph          *types.KnowledgeGraph
 	ai             *inference_engine.InferenceService
 	chromemManager ChromemManager
+	mu             sync.RWMutex // Mutex for concurrent access to graph
 }
 
 // NewScanner creates a new scanner instance
@@ -147,7 +149,9 @@ func (s *Scanner) scanStaticCode(_ context.Context) error {
 					filepath.Base(path), node.Metadata["lines"], complexity, len(codeSmells))
 			}
 
+			s.mu.Lock()
 			s.graph.Nodes[node.ID] = node
+			s.mu.Unlock()
 
 			// Persist node to database immediately for real-time dashboard updates
 			s.persistNodeToDatabase(node)
@@ -212,7 +216,9 @@ func (s *Scanner) scanGoMod() error {
 						"manager": "go",
 					},
 				}
+				s.mu.Lock()
 				s.graph.Nodes[node.ID] = node
+				s.mu.Unlock()
 				s.persistNodeToDatabase(node)
 			}
 		}
@@ -246,7 +252,9 @@ func (s *Scanner) scanPackageJSON() error {
 					"manager": "npm",
 				},
 			}
+			s.mu.Lock()
 			s.graph.Nodes[node.ID] = node
+			s.mu.Unlock()
 			s.persistNodeToDatabase(node)
 		}
 	}
@@ -287,7 +295,9 @@ func (s *Scanner) scanRequirementsTxt() error {
 				"manager": "pip",
 			},
 		}
+		s.mu.Lock()
 		s.graph.Nodes[node.ID] = node
+		s.mu.Unlock()
 		s.persistNodeToDatabase(node)
 	}
 
@@ -306,13 +316,20 @@ func (s *Scanner) scanRuntime() error {
 	}
 
 	// Add runtime nodes to knowledge graph
+	s.mu.Lock()
 	for _, node := range processNodes {
 		s.graph.Nodes[node.ID] = node
-		s.persistNodeToDatabase(node)
 	}
-
 	for _, node := range connectionNodes {
 		s.graph.Nodes[node.ID] = node
+	}
+	s.mu.Unlock()
+
+	// Persist nodes after releasing the lock
+	for _, node := range processNodes {
+		s.persistNodeToDatabase(node)
+	}
+	for _, node := range connectionNodes {
 		s.persistNodeToDatabase(node)
 	}
 
@@ -359,7 +376,9 @@ func (s *Scanner) scanDatabaseModels(_ context.Context) error {
 			log.Printf("  📊 Analyzed database model %s: %d relationships", filepath.Base(path), len(relationships))
 
 			// Add node to graph (with or without AI analysis)
+			s.mu.Lock()
 			s.graph.Nodes[node.ID] = node
+			s.mu.Unlock()
 
 			// Persist node to database immediately
 			s.persistNodeToDatabase(node)
@@ -393,7 +412,9 @@ func (s *Scanner) scanAPIs(ctx context.Context) error {
 				Path:     path,
 				Metadata: make(map[string]interface{}),
 			}
+			s.mu.Lock()
 			s.graph.Nodes[node.ID] = node
+			s.mu.Unlock()
 
 			// Persist node to database immediately
 			s.persistNodeToDatabase(node)
@@ -446,7 +467,9 @@ func (s *Scanner) scanTestCoverage(ctx context.Context) error {
 				"scan_time":     time.Now(),
 			},
 		}
+		s.mu.Lock()
 		s.graph.Nodes[coverageNode.ID] = coverageNode
+		s.mu.Unlock()
 
 		log.Printf("  📊 Coverage scan complete: %.1f%% coverage", coverageData["overall_coverage"].(float64))
 	}
@@ -1164,6 +1187,8 @@ func (s *Scanner) readFileSafely(filePath string) ([]byte, error) {
 
 // GetKnowledgeGraph returns the current knowledge graph
 func (s *Scanner) GetKnowledgeGraph() *types.KnowledgeGraph {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.graph
 }
 
@@ -1280,14 +1305,16 @@ func (rs *RuntimeScanner) scanNetworkConnections() ([]*types.Node, error) {
 		remoteAddr := fmt.Sprintf("%s:%d", conn.Raddr.IP, conn.Raddr.Port)
 
 		if existingNode, exists := connectionMap[localAddr]; exists {
-			// Add to existing connection node
+			// Add to existing connection node - create a new slice to avoid concurrent modification
 			if conns, ok := existingNode.Metadata["connections"].([]map[string]interface{}); ok {
-				conns = append(conns, map[string]interface{}{
+				newConns := make([]map[string]interface{}, len(conns))
+				copy(newConns, conns)
+				newConns = append(newConns, map[string]interface{}{
 					"remote_address": remoteAddr,
 					"status":         conn.Status,
 					"protocol":       rs.getProtocolName(conn.Type),
 				})
-				existingNode.Metadata["connections"] = conns
+				existingNode.Metadata["connections"] = newConns
 			}
 		} else {
 			// Create new connection node
@@ -1383,15 +1410,16 @@ func (s *Scanner) calculateCyclomaticComplexity(_ string, content []byte) int {
 
 	// Decision points that increase complexity
 	patterns := []string{
-		`\bif\s*\(`,        // if statements
-		`\belse\s+if\s*\(`, // else if statements
-		`\bfor\s*\(`,       // for loops
-		`\bwhile\s*\(`,     // while loops
-		`\bcase\s+.*:`,     // switch cases
-		`\bcatch\s*\(`,     // catch blocks
-		`\b\|\|`,           // logical OR
-		`\b&&`,             // logical AND
-		`\?`,               // ternary operator
+		`\bif\s+`,        // if statements
+		`\belse\s+if\s+`, // else if statements
+		`\belse\s*\{`,    // else blocks
+		`\bfor\s+`,       // for loops
+		`\bwhile\s+`,     // while loops
+		`\bcase\s+.*:`,   // switch cases
+		`\bcatch\s*\(`,   // catch blocks
+		`\b\|\|`,         // logical OR
+		`\b&&`,           // logical AND
+		`\?`,             // ternary operator
 	}
 
 	for _, pattern := range patterns {
@@ -1432,7 +1460,7 @@ func (s *Scanner) detectCodeSmells(_ string, content []byte) []CodeSmell {
 				methodLength := i - methodStart
 				if methodLength > 50 {
 					smells = append(smells, CodeSmell{
-						Type:        "LongMethod",
+						Type:        "long_function",
 						Description: fmt.Sprintf("Method '%s' is too long (%d lines)", methodName, methodLength),
 						Line:        methodStart + 1,
 						Severity:    "Medium",
@@ -1458,7 +1486,7 @@ func (s *Scanner) detectCodeSmells(_ string, content []byte) []CodeSmell {
 					methodLength := i - methodStart + 1
 					if methodLength > 50 {
 						smells = append(smells, CodeSmell{
-							Type:        "LongMethod",
+							Type:        "long_function",
 							Description: fmt.Sprintf("Method '%s' is too long (%d lines)", methodName, methodLength),
 							Line:        methodStart + 1,
 							Severity:    "Medium",
@@ -1477,7 +1505,7 @@ func (s *Scanner) detectCodeSmells(_ string, content []byte) []CodeSmell {
 		nestingLevel := leadingSpaces / 4 // Assuming 4 spaces per indent level
 		if nestingLevel > 3 {
 			smells = append(smells, CodeSmell{
-				Type:        "DeepNesting",
+				Type:        "deep_nesting",
 				Description: fmt.Sprintf("Deep nesting detected (level %d)", nestingLevel),
 				Line:        i + 1,
 				Severity:    "Medium",
@@ -1489,7 +1517,7 @@ func (s *Scanner) detectCodeSmells(_ string, content []byte) []CodeSmell {
 	for i, line := range lines {
 		if len(line) > 120 {
 			smells = append(smells, CodeSmell{
-				Type:        "LongLine",
+				Type:        "long_line",
 				Description: fmt.Sprintf("Line too long (%d characters)", len(line)),
 				Line:        i + 1,
 				Severity:    "Low",
@@ -1502,7 +1530,7 @@ func (s *Scanner) detectCodeSmells(_ string, content []byte) []CodeSmell {
 	for i, line := range lines {
 		if todoRegex.MatchString(line) {
 			smells = append(smells, CodeSmell{
-				Type:        "TodoComment",
+				Type:        "fixme_comment",
 				Description: "TODO/FIXME comment found",
 				Line:        i + 1,
 				Severity:    "Low",
@@ -1520,7 +1548,7 @@ func (s *Scanner) detectCodeSmells(_ string, content []byte) []CodeSmell {
 				continue
 			}
 			smells = append(smells, CodeSmell{
-				Type:        "MagicNumber",
+				Type:        "magic_number",
 				Description: fmt.Sprintf("Magic number '%s' detected", match),
 				Line:        i + 1,
 				Severity:    "Low",
@@ -1533,7 +1561,7 @@ func (s *Scanner) detectCodeSmells(_ string, content []byte) []CodeSmell {
 	for i, line := range lines {
 		if catchRegex.MatchString(line) {
 			smells = append(smells, CodeSmell{
-				Type:        "EmptyCatch",
+				Type:        "empty_catch",
 				Description: "Empty catch block",
 				Line:        i + 1,
 				Severity:    "High",
@@ -1735,6 +1763,9 @@ func (s *Scanner) extractGenericRelationships(lines []string) []DatabaseRelation
 // buildDeterministicEdges creates graph edges from parsed relationships
 func (s *Scanner) buildDeterministicEdges(ctx context.Context) {
 	_ = ctx // Acknowledge context for future use
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	// Build edges from import/dependency relationships
 	for _, node := range s.graph.Nodes {

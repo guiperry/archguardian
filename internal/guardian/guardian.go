@@ -30,6 +30,16 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// ChromemManager interface for database operations used by ArchGuardian
+type ChromemManager interface {
+	UpsertNode(node *types.Node) error
+	StoreRiskAssessment(assessment *types.RiskAssessment) error
+	GetAllNodes() ([]*types.Node, error)
+	GetLatestRiskAssessment() (*types.RiskAssessment, error)
+	GetIssueByID(issueID string) (interface{}, error)
+	GetCodeContext(filePath string, lineNumber int, contextLines int) (string, error)
+}
+
 // wsConnection wraps a WebSocket connection with a mutex for safe concurrent writes
 type wsConnection struct {
 	conn  *websocket.Conn
@@ -72,17 +82,17 @@ type ArchGuardian struct {
 	aiRemediator       *remediation.AIRemediator // AI-powered remediation service
 	baseline           *BaselineChecker
 	dataEngine         *data_engine.DataEngine
-	chromemManager     *data_engine.ChromemManager // Persistent storage for knowledge graph and risks
-	logWriter          *logWriter                  // Real-time log streaming to dashboard
-	triggerScan        chan bool                   // Channel to trigger manual scans
-	dashboardConns     []*wsConnection             // Connected dashboard WebSocket clients
-	connMutex          sync.Mutex                  // Mutex for dashboard connections list
-	baselineStarted    bool                        // Whether baseline periodic updates have been started
-	baselineMutex      sync.Mutex                  // Protects baselineStarted
-	projectID          string                      // Unique identifier for the current project
-	broadcastChan      chan broadcastMessage       // Channel for broadcasting messages to WebSocket clients
-	broadcastDone      chan struct{}               // Channel to signal broadcast goroutine shutdown
-	lastProgressUpdate time.Time                   // Timestamp of last progress update to throttle frequent updates
+	chromemManager     ChromemManager        // Persistent storage for knowledge graph and risks
+	logWriter          *logWriter            // Real-time log streaming to dashboard
+	triggerScan        chan bool             // Channel to trigger manual scans
+	dashboardConns     []*wsConnection       // Connected dashboard WebSocket clients
+	connMutex          sync.Mutex            // Mutex for dashboard connections list
+	baselineStarted    bool                  // Whether baseline periodic updates have been started
+	baselineMutex      sync.Mutex            // Protects baselineStarted
+	projectID          string                // Unique identifier for the current project
+	broadcastChan      chan broadcastMessage // Channel for broadcasting messages to WebSocket clients
+	broadcastDone      chan struct{}         // Channel to signal broadcast goroutine shutdown
+	lastProgressUpdate time.Time             // Timestamp of last progress update to throttle frequent updates
 }
 
 const (
@@ -351,7 +361,7 @@ func createWebSocketMessage(msgType string, data interface{}) map[string]interfa
 }
 
 // NewArchGuardian creates a new ArchGuardian instance with all dependencies
-func NewArchGuardian(config *config.Config, aiEngine *inference_engine.InferenceService, chromemManager *data_engine.ChromemManager) *ArchGuardian {
+func NewArchGuardian(config *config.Config, aiEngine *inference_engine.InferenceService, chromemManager ChromemManager) *ArchGuardian {
 	log.Println("🚀 Initializing ArchGuardian Core...")
 
 	// Initialize data engine if enabled
@@ -389,8 +399,15 @@ func NewArchGuardian(config *config.Config, aiEngine *inference_engine.Inference
 	diagnoser := risk.NewRiskDiagnoser(scannerInstance, nil) // TODO: Pass proper Codacy client when implemented
 	log.Println("✅ Risk diagnoser initialized successfully")
 
-	// Initialize AI remediator
-	aiRemediator := remediation.NewAIRemediator(aiEngine, scannerInstance, diagnoser, chromemManager)
+	// Initialize AI remediator - convert interface to concrete type for compatibility
+	var concreteChromemManager *data_engine.ChromemManager
+	if chromemManager != nil {
+		// Type assertion to get the concrete implementation
+		if cm, ok := chromemManager.(*data_engine.ChromemManager); ok {
+			concreteChromemManager = cm
+		}
+	}
+	aiRemediator := remediation.NewAIRemediator(aiEngine, scannerInstance, diagnoser, concreteChromemManager)
 	log.Println("✅ AI Remediator initialized successfully")
 
 	// Initialize remediator
@@ -462,25 +479,46 @@ func (ag *ArchGuardian) Run(ctx context.Context) error {
 	log.Printf("📁 Project path: %s", getEnv("PROJECT_PATH", ag.config.ProjectPath))
 	log.Printf("🤖 AI Provider: %s", getEnv("AI_PROVIDER", "gemini"))
 
-	ticker := time.NewTicker(ag.config.ScanInterval)
-	defer ticker.Stop()
+	// Only create ticker if scan interval is positive
+	var ticker *time.Ticker
+	if ag.config.ScanInterval > 0 {
+		ticker = time.NewTicker(ag.config.ScanInterval)
+		defer ticker.Stop()
+	} else {
+		log.Println("⚠️  Scan interval is zero or negative, periodic scans disabled")
+	}
 
 	// Run scans based on ticker or manual trigger
 	for {
-		select {
-		case <-ctx.Done():
-			log.Println("🛑 ArchGuardian shutting down...")
-			return ctx.Err()
-		case <-ag.triggerScan: // Handle manual scan trigger
-			log.Println("⚡ Manual scan triggered via API.")
-			if err := ag.runCycle(ctx); err != nil {
-				log.Printf("❌ Manual scan cycle failed: %v", err)
+		if ticker == nil {
+			// If no ticker, only handle manual triggers and context cancellation
+			select {
+			case <-ctx.Done():
+				log.Println("🛑 ArchGuardian shutting down...")
+				return ctx.Err()
+			case <-ag.triggerScan: // Handle manual scan trigger
+				log.Println("⚡ Manual scan triggered via API.")
+				if err := ag.runCycle(ctx); err != nil {
+					log.Printf("❌ Manual scan cycle failed: %v", err)
+				}
 			}
-			// Reset the ticker to align with the manual scan time, preventing immediate double scan
-			ticker.Reset(ag.config.ScanInterval)
-		case <-ticker.C:
-			if err := ag.runCycle(ctx); err != nil {
-				log.Printf("❌ Scan cycle failed: %v", err)
+		} else {
+			// With ticker, handle all cases
+			select {
+			case <-ctx.Done():
+				log.Println("🛑 ArchGuardian shutting down...")
+				return ctx.Err()
+			case <-ag.triggerScan: // Handle manual scan trigger
+				log.Println("⚡ Manual scan triggered via API.")
+				if err := ag.runCycle(ctx); err != nil {
+					log.Printf("❌ Manual scan cycle failed: %v", err)
+				}
+				// Reset the ticker to align with the manual scan time, preventing immediate double scan
+				ticker.Reset(ag.config.ScanInterval)
+			case <-ticker.C:
+				if err := ag.runCycle(ctx); err != nil {
+					log.Printf("❌ Scan cycle failed: %v", err)
+				}
 			}
 		}
 	}
@@ -1124,7 +1162,7 @@ func (ag *ArchGuardian) GetDataEngine() *data_engine.DataEngine {
 }
 
 // GetChromemManager returns the chromem manager instance
-func (ag *ArchGuardian) GetChromemManager() *data_engine.ChromemManager {
+func (ag *ArchGuardian) GetChromemManager() ChromemManager {
 	return ag.chromemManager
 }
 
