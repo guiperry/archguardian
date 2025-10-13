@@ -488,7 +488,8 @@ func (s *Scanner) buildKnowledgeGraph(ctx context.Context) error {
 	// Infer relationships using deterministic rule-based analysis
 	relationships := s.inferRelationshipsDeterministically(graphData)
 
-	// Convert relationships to graph edges
+	// Convert relationships to graph edges with proper synchronization
+	s.mu.Lock()
 	for _, rel := range relationships {
 		edge := &types.Edge{
 			From:         rel.From,
@@ -499,6 +500,7 @@ func (s *Scanner) buildKnowledgeGraph(ctx context.Context) error {
 		}
 		s.graph.Edges = append(s.graph.Edges, edge)
 	}
+	s.mu.Unlock()
 
 	// Also build edges from existing deterministic methods
 	s.buildDeterministicEdges(ctx)
